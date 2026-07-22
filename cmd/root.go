@@ -13,10 +13,11 @@ import (
 )
 
 type dependencies struct {
-	configs config.Store
-	tokens  tokenstore.Store
-	api     netbox.Provisioner
-	prompt  prompt.Prompter
+	configs   config.Store
+	tokens    tokenstore.Store
+	api       netbox.Provisioner
+	resources netbox.ResourceReader
+	prompt    prompt.Prompter
 }
 
 func defaultDependencies(in io.Reader, out io.Writer) (dependencies, error) {
@@ -24,11 +25,13 @@ func defaultDependencies(in io.Reader, out io.Writer) (dependencies, error) {
 	if err != nil {
 		return dependencies{}, err
 	}
+	client := netbox.NewClient()
 	return dependencies{
-		configs: configs,
-		tokens:  tokenstore.NewKeyringStore(),
-		api:     netbox.NewClient(),
-		prompt:  prompt.New(in, out),
+		configs:   configs,
+		tokens:    tokenstore.NewKeyringStore(),
+		api:       client,
+		resources: client,
+		prompt:    prompt.New(in, out),
 	}, nil
 }
 
@@ -39,7 +42,7 @@ func newRootCmd(deps dependencies) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newAuthCmd(deps))
+	root.AddCommand(newAuthCmd(deps), newGetCmd(deps), newResourcesCmd(deps))
 	return root
 }
 

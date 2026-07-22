@@ -31,3 +31,20 @@ nbxcli auth token show
 ```
 
 Tokens are never printed by `auth login`. Re-running login for a profile creates another token in NetBox and replaces only the token held locally by `nbxcli`.
+
+## Query NetBox resources
+
+List the first-party model resources exposed by the current NetBox instance:
+
+```sh
+nbxcli resources
+```
+
+Query a resource using its `application.resource` name:
+
+```sh
+nbxcli get dcim.devices --search edge --filter site=tokyo --limit 25
+nbxcli get ipam.prefixes 42
+```
+
+The default output is a compact `ID`, `DISPLAY`, and `STATUS` table. Use `--output json` for complete API records suitable for scripts. Add `--profile NAME` to query a saved profile other than the current one; repeat `--filter key=value` to pass additional NetBox list filters through to the API. List-only flags (`--search`, `--filter`, and `--limit`) cannot be used when retrieving an individual record.
