@@ -14,6 +14,16 @@ Or build from a checkout:
 go build ./...
 ```
 
+## Development
+
+With Node.js 24 or later installed, enable the commit-message hook once:
+
+```sh
+npm install
+```
+
+Commits follow the Conventional Commits format, for example `fix: handle empty API responses` or `feat(auth): support profile import`. Pull requests validate every commit message. Merges to `main` automatically create GitHub releases from eligible commits using unprefixed semantic-version tags such as `1.0.0`.
+
 ## Authenticate
 
 ```sh

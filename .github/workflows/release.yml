@@ -2,11 +2,15 @@ name: release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 permissions:
   contents: read
+
+concurrency:
+  group: semantic-release-main
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -18,79 +22,23 @@ jobs:
           go-version-file: go.mod
       - run: go test ./...
 
-  build:
+  release:
     needs: test
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            extension: ""
-            archive: tar.gz
-          - goos: linux
-            goarch: arm64
-            extension: ""
-            archive: tar.gz
-          - goos: darwin
-            goarch: amd64
-            extension: ""
-            archive: tar.gz
-          - goos: darwin
-            goarch: arm64
-            extension: ""
-            archive: tar.gz
-          - goos: windows
-            goarch: amd64
-            extension: .exe
-            archive: zip
-          - goos: windows
-            goarch: arm64
-            extension: .exe
-            archive: zip
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: Build and package
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          EXTENSION: ${{ matrix.extension }}
-          ARCHIVE: ${{ matrix.archive }}
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          asset="nbxcli_${version}_${GOOS}_${GOARCH}"
-          mkdir dist
-          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/nbxcli${EXTENSION}" .
-
-          if [ "$ARCHIVE" = "tar.gz" ]; then
-            tar -C dist -czf "dist/${asset}.tar.gz" nbxcli
-          else
-            zip -j "dist/${asset}.zip" "dist/nbxcli.exe"
-          fi
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*.${{ matrix.archive }}
-
-  publish:
-    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          path: release-assets
-          merge-multiple: true
-      - name: Generate checksums
-        working-directory: release-assets
-        run: sha256sum *.tar.gz *.zip > checksums.txt
-      - uses: softprops/action-gh-release@v2
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
         with:
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: release-assets/*
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
