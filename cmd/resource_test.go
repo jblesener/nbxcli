@@ -56,14 +56,57 @@ func TestGetResourceUsesProfileAndRendersTable(t *testing.T) {
 	}
 }
 
-func TestGetResourceDetailWritesJSON(t *testing.T) {
+func TestGetCommandDefaultsToTable(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{"lab": {BaseURL: "https://netbox.example"}}}}
+	deps := dependencies{configs: configs, tokens: &memoryTokenStore{values: map[string]string{"lab": "secret"}}}
+
+	for _, test := range []struct {
+		name    string
+		args    []string
+		reader  *fakeResourceReader
+		matches []string
+	}{
+		{
+			name:    "list",
+			args:    []string{"dcim.devices"},
+			reader:  &fakeResourceReader{records: []json.RawMessage{json.RawMessage(`{"id":1,"name":"leaf-01","status":{"label":"Active"}}`)}},
+			matches: []string{"ID", "DISPLAY", "STATUS", "1", "leaf-01", "Active"},
+		},
+		{
+			name:    "detail",
+			args:    []string{"ipam.prefixes", "42"},
+			reader:  &fakeResourceReader{record: json.RawMessage(`{"id":42,"display":"192.0.2.0/24","status":"active"}`)},
+			matches: []string{"ID", "DISPLAY", "STATUS", "42", "192.0.2.0/24", "active"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := newGetCmd(dependencies{configs: deps.configs, tokens: deps.tokens, resources: test.reader})
+			cmd.SetOut(&out)
+			cmd.SetArgs(test.args)
+
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			for _, match := range test.matches {
+				if !strings.Contains(out.String(), match) {
+					t.Errorf("output %q does not contain %q", out.String(), match)
+				}
+			}
+		})
+	}
+}
+
+func TestGetCommandDetailWritesJSON(t *testing.T) {
 	configs := &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{"lab": {BaseURL: "https://netbox.example"}}}}
 	reader := &fakeResourceReader{record: json.RawMessage(`{"id":42,"display":"192.0.2.0/24"}`)}
 	deps := dependencies{configs: configs, tokens: &memoryTokenStore{values: map[string]string{"lab": "secret"}}, resources: reader}
-	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	var out bytes.Buffer
-	if err := getResource(context.Background(), &out, deps, []string{"ipam.prefixes", "42"}, resourceGetOptions{output: "json"}, flags); err != nil {
-		t.Fatalf("getResource() error = %v", err)
+	cmd := newGetCmd(deps)
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"ipam.prefixes", "42", "--output", "json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
 	}
 	if reader.resource != "ipam.prefixes" || out.String() != `{"id":42,"display":"192.0.2.0/24"}`+"\n" {
 		t.Fatalf("result = reader=%#v output=%q", reader, out.String())
