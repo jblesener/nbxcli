@@ -146,34 +146,64 @@ func TestLoginFailureDoesNotReplaceExistingToken(t *testing.T) {
 	}
 }
 
-func TestTokenShowRequiresConfirmation(t *testing.T) {
+func TestTokenShowWritesSelectedToken(t *testing.T) {
 	configs := &memoryConfigStore{cfg: config.Config{
 		CurrentProfile: "lab",
 		Profiles:       map[string]config.Profile{"lab": {BaseURL: "https://netbox.example", TokenVersion: 2}},
 	}}
 	tokens := &memoryTokenStore{values: map[string]string{"lab": "nbt_key.secret"}}
 
-	deniedDeps := dependencies{configs: configs, tokens: tokens, prompt: &scriptedPrompt{strings: []string{"lab"}, confirms: []bool{false}}}
-	denied := newTokenCmd(deniedDeps)
-	var deniedOutput bytes.Buffer
-	denied.SetOut(&deniedOutput)
-	denied.SetArgs([]string{"show"})
-	if err := denied.Execute(); err == nil {
-		t.Fatal("auth token show succeeded without confirmation")
-	}
-	if strings.Contains(deniedOutput.String(), "nbt_key.secret") {
-		t.Fatalf("denied output exposed token: %q", deniedOutput.String())
-	}
-
-	confirmedDeps := dependencies{configs: configs, tokens: tokens, prompt: &scriptedPrompt{strings: []string{"lab"}, confirms: []bool{true}}}
-	confirmed := newTokenCmd(confirmedDeps)
-	var confirmedOutput bytes.Buffer
-	confirmed.SetOut(&confirmedOutput)
-	confirmed.SetArgs([]string{"show"})
-	if err := confirmed.Execute(); err != nil {
+	cmd := newTokenCmd(dependencies{configs: configs, tokens: tokens})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"show", "--profile", "lab"})
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("auth token show error = %v", err)
 	}
-	if got := confirmedOutput.String(); got != "nbt_key.secret\n" {
+	if got := out.String(); got != "nbt_key.secret\n" {
 		t.Fatalf("auth token show output = %q", got)
 	}
+}
+
+func TestTokenShowUsesCurrentProfileAndRejectsMissingToken(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{
+		CurrentProfile: "lab",
+		Profiles:       map[string]config.Profile{"lab": {BaseURL: "https://netbox.example", TokenVersion: 2}},
+	}}
+	t.Run("current profile", func(t *testing.T) {
+		cmd := newTokenCmd(dependencies{configs: configs, tokens: &memoryTokenStore{values: map[string]string{"lab": "current-secret"}}})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"show"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		if got := out.String(); got != "current-secret\n" {
+			t.Fatalf("stdout = %q", got)
+		}
+	})
+	t.Run("missing token", func(t *testing.T) {
+		cmd := newTokenCmd(dependencies{configs: configs, tokens: &memoryTokenStore{}})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"show"})
+		if err := cmd.Execute(); err == nil {
+			t.Fatal("auth token show succeeded for missing token")
+		}
+		if got := out.String(); got != "" {
+			t.Fatalf("stdout = %q", got)
+		}
+	})
+	t.Run("missing profile", func(t *testing.T) {
+		cmd := newTokenCmd(dependencies{configs: configs, tokens: &memoryTokenStore{}})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"show", "--profile", "unknown"})
+		if err := cmd.Execute(); err == nil {
+			t.Fatal("auth token show succeeded for missing profile")
+		}
+		if got := out.String(); got != "" {
+			t.Fatalf("stdout = %q", got)
+		}
+	})
 }

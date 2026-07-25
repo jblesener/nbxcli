@@ -34,13 +34,13 @@ The command prompts for a profile name, NetBox URL, username, and password. It c
 
 If certificate validation fails, login can explicitly retry without verification for that profile. This should be used only with a trusted private development environment.
 
-To display a saved token, invoke the explicit reveal command and confirm the warning:
+To write a saved token for use in a script, invoke the explicit reveal command:
 
 ```sh
-nbxcli auth token show
+nbxcli auth token show --profile production
 ```
 
-Tokens are never printed by `auth login`. Re-running login for a profile creates another token in NetBox and replaces only the token held locally by `nbxcli`.
+The command writes only the token and a trailing newline to standard output. Treat its output as a secret. Tokens are never printed by `auth login`. Re-running login for a profile creates another token in NetBox and replaces only the token held locally by `nbxcli`.
 
 ## Query NetBox resources
 

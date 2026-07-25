@@ -129,29 +129,25 @@ func defaultProfile(cfg config.Config) string {
 }
 
 func newTokenCmd(deps dependencies) *cobra.Command {
-	token := &cobra.Command{Use: "token", Short: "Manage saved API tokens"}
-	token.AddCommand(&cobra.Command{
+	token := &cobra.Command{Use: "token", Short: "Manage saved API tokens", SilenceUsage: true}
+	var profileName string
+	show := &cobra.Command{
 		Use:   "show",
-		Short: "Display a saved API token after confirmation",
+		Short: "Write a saved API token to standard output",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := deps.configs.Load()
 			if err != nil {
 				return fmt.Errorf("load profiles: %w", err)
 			}
-			profileName, err := deps.prompt.String("Profile name", defaultProfile(cfg))
-			if err != nil {
+			if profileName == "" {
+				profileName = defaultProfile(cfg)
+			}
+			if err := config.ValidateProfileName(profileName); err != nil {
 				return err
 			}
 			if _, ok := cfg.Profiles[profileName]; !ok {
 				return fmt.Errorf("profile %q does not exist", profileName)
-			}
-			confirmed, err := deps.prompt.Confirm("Print this token to the terminal", false)
-			if err != nil {
-				return err
-			}
-			if !confirmed {
-				return errors.New("token display cancelled")
 			}
 			value, err := deps.tokens.Get(profileName)
 			if err != nil {
@@ -160,6 +156,8 @@ func newTokenCmd(deps dependencies) *cobra.Command {
 			fmt.Fprintln(cmd.OutOrStdout(), value)
 			return nil
 		},
-	})
+	}
+	show.Flags().StringVar(&profileName, "profile", "", "saved NetBox profile to use")
+	token.AddCommand(show)
 	return token
 }
