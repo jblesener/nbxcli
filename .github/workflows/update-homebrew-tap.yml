@@ -1,0 +1,113 @@
+name: Update Homebrew tap
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Stable GitHub Release tag to publish to the tap
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-tap-nbxcli
+  cancel-in-progress: false
+
+jobs:
+  update-formula:
+    if: github.event_name != 'release' || (!github.event.release.draft && !github.event.release.prerelease)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve stable release
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          MANUAL_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$RELEASE_TAG"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$MANUAL_TAG"
+            state="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | any')"
+            if [ "$state" != "false" ]; then
+              echo "release $tag is a draft or prerelease" >&2
+              exit 1
+            fi
+          fi
+          version="${tag#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "release tag must contain a semantic version: $tag" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          asset_dir="$RUNNER_TEMP/nbxcli-release-assets"
+          mkdir -p "$asset_dir"
+          assets=(
+            "nbxcli_${{ steps.release.outputs.version }}_darwin_arm64.tar.gz"
+            "nbxcli_${{ steps.release.outputs.version }}_darwin_amd64.tar.gz"
+            "nbxcli_${{ steps.release.outputs.version }}_linux_arm64.tar.gz"
+            "nbxcli_${{ steps.release.outputs.version }}_linux_amd64.tar.gz"
+          )
+          for asset in "${assets[@]}"; do
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$asset_dir"
+            test -f "$asset_dir/$asset"
+          done
+
+      - uses: actions/checkout@v4
+        with:
+          repository: jblesener/homebrew-tools
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Render formula
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          asset_dir="$RUNNER_TEMP/nbxcli-release-assets"
+          ruby tap/scripts/update_formula.rb \
+            --formula nbxcli \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --tap-dir tap \
+            --asset "darwin-arm64=$asset_dir/nbxcli_${RELEASE_VERSION}_darwin_arm64.tar.gz" \
+            --asset "darwin-amd64=$asset_dir/nbxcli_${RELEASE_VERSION}_darwin_amd64.tar.gz" \
+            --asset "linux-arm64=$asset_dir/nbxcli_${RELEASE_VERSION}_linux_arm64.tar.gz" \
+            --asset "linux-amd64=$asset_dir/nbxcli_${RELEASE_VERSION}_linux_amd64.tar.gz"
+
+      - name: Commit formula update
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        working-directory: tap
+        run: |
+          if git diff --quiet -- Formula/nbxcli.rb; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/nbxcli.rb
+          git commit -m "brew: update nbxcli to $RELEASE_TAG"
+          git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/jblesener/homebrew-tools.git"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+          done
+          exit 1
