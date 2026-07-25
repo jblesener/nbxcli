@@ -96,12 +96,14 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         working-directory: tap
         run: |
-          if git diff --quiet -- Formula/nbxcli.rb; then
+          # The formula may be new. `git diff` does not report untracked files,
+          # so stage it before deciding whether there is anything to commit.
+          git add Formula/nbxcli.rb
+          if git diff --cached --quiet -- Formula/nbxcli.rb; then
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/nbxcli.rb
           git commit -m "brew: update nbxcli to $RELEASE_TAG"
           git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/jblesener/homebrew-tools.git"
           for attempt in 1 2 3; do
