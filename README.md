@@ -58,3 +58,8 @@ nbxcli get ipam.prefixes 42
 ```
 
 The default output is a compact `ID`, `DISPLAY`, and `STATUS` table. Use `--output json` for complete API records suitable for scripts. Add `--profile NAME` to query a saved profile other than the current one; repeat `--filter key=value` to pass additional NetBox list filters through to the API. List-only flags (`--search`, `--filter`, and `--limit`) cannot be used when retrieving an individual record.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+Copyright © 2026 John Blesener.
