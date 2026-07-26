@@ -2,6 +2,8 @@
 
 `nbxcli` is a command-line client for [NetBox](https://netbox.dev/). Its first feature securely provisions and stores a NetBox API token using an interactive login.
 
+Full installation, workflow, and command-reference documentation is available at [jblesener.github.io/nbxcli](https://jblesener.github.io/nbxcli/).
+
 ## Install
 
 ```sh

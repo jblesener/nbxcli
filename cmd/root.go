@@ -48,6 +48,15 @@ func newRootCmd(deps dependencies) *cobra.Command {
 	return root
 }
 
+// NewDocumentationRootCmd returns the command tree without initializing
+// user configuration, keyrings, or network clients. It is intended solely
+// for generating static command-reference documentation.
+func NewDocumentationRootCmd() *cobra.Command {
+	root := newRootCmd(dependencies{})
+	root.DisableAutoGenTag = true
+	return root
+}
+
 // Execute runs the command-line application with the host terminal attached.
 func Execute() error {
 	deps, err := defaultDependencies(os.Stdin, os.Stdout)

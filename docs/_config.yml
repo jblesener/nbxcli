@@ -1,0 +1,12 @@
+title: nbxcli documentation
+description: A safe command-line client for NetBox.
+url: "https://jblesener.github.io"
+baseurl: "/nbxcli"
+repository: "https://github.com/jblesener/nbxcli"
+product: nbxcli
+accent: "#00a97a"
+markdown: kramdown
+kramdown:
+  input: GFM
+exclude:
+  - reference/.gitkeep
