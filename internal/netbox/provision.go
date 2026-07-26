@@ -18,6 +18,7 @@ import (
 const provisionPath = "/api/users/tokens/provision/"
 
 type ProvisionResult struct {
+	ID      int
 	Token   string
 	Version int
 }
@@ -77,6 +78,7 @@ func (c *Client) Provision(ctx context.Context, baseURL, username, password stri
 		return ProvisionResult{}, apiError(response.StatusCode, responseBody)
 	}
 	var payload struct {
+		ID      int    `json:"id"`
 		Version int    `json:"version"`
 		Key     string `json:"key"`
 		Token   string `json:"token"`
@@ -84,16 +86,23 @@ func (c *Client) Provision(ctx context.Context, baseURL, username, password stri
 	if err := json.Unmarshal(responseBody, &payload); err != nil {
 		return ProvisionResult{}, fmt.Errorf("decode NetBox response: %w", err)
 	}
-	if payload.Version == 2 {
-		if payload.Key == "" || payload.Token == "" {
+	return provisionResult(payload.ID, payload.Version, payload.Key, payload.Token)
+}
+
+func provisionResult(id, version int, key, token string) (ProvisionResult, error) {
+	if version == 0 {
+		version = 1
+	}
+	if version == 2 {
+		if key == "" || token == "" {
 			return ProvisionResult{}, errors.New("NetBox v2 token response is missing key or token")
 		}
-		return ProvisionResult{Token: "nbt_" + payload.Key + "." + payload.Token, Version: 2}, nil
+		return ProvisionResult{ID: id, Token: "nbt_" + key + "." + token, Version: 2}, nil
 	}
-	if payload.Key == "" {
+	if version != 1 || key == "" {
 		return ProvisionResult{}, errors.New("NetBox token response is missing token key")
 	}
-	return ProvisionResult{Token: payload.Key, Version: 1}, nil
+	return ProvisionResult{ID: id, Token: key, Version: 1}, nil
 }
 
 func apiError(status int, body []byte) error {

@@ -263,3 +263,65 @@ func TestDeleteResourceUsesDetailEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTokenLifecycleUsesV2Authentication(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/users/tokens/":
+			if got := r.Header.Get("Authorization"); got != "Bearer nbt_oldkey.oldsecret" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			if got := r.URL.Query().Get("key"); got != "oldkey" {
+				t.Fatalf("key = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"results":[{"id":7,"version":2}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/users/tokens/":
+			if got := r.Header.Get("Authorization"); got != "Bearer nbt_oldkey.oldsecret" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body) != 0 {
+				t.Fatalf("body=%#v err=%v", body, err)
+			}
+			_, _ = w.Write([]byte(`{"id":8,"version":2,"key":"newkey","token":"newsecret"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/users/tokens/7/":
+			if got := r.Header.Get("Authorization"); got != "Bearer nbt_newkey.newsecret" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	old := "nbt_oldkey.oldsecret"
+	metadata, err := client.FindToken(context.Background(), server.URL, old, false)
+	if err != nil || metadata != (TokenMetadata{ID: 7, Version: 2}) {
+		t.Fatalf("FindToken() = %#v, %v", metadata, err)
+	}
+	created, err := client.CreateToken(context.Background(), server.URL, old, false)
+	if err != nil || created.ID != 8 || created.Version != 2 || created.Token != "nbt_newkey.newsecret" {
+		t.Fatalf("CreateToken() = %#v, %v", created, err)
+	}
+	if err := client.DeleteToken(context.Background(), server.URL, created.Token, false, metadata.ID); err != nil {
+		t.Fatalf("DeleteToken() error = %v", err)
+	}
+}
+
+func TestFindTokenRejectsLegacyAndAmbiguousTokens(t *testing.T) {
+	client := NewClient()
+	if _, err := client.FindToken(context.Background(), "https://netbox.example", "legacy", false); err == nil {
+		t.Fatal("FindToken() succeeded for legacy token")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer server.Close()
+	if _, err := client.FindToken(context.Background(), server.URL, "nbt_key.secret", false); err == nil || !strings.Contains(err.Error(), "could not identify") {
+		t.Fatalf("FindToken() error = %v", err)
+	}
+}

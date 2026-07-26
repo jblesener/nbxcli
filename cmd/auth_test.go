@@ -79,6 +79,35 @@ type fakeProvisioner struct {
 	errors  []error
 }
 
+type deleteCall struct {
+	token string
+	id    int
+}
+
+type fakeTokenManager struct {
+	findResult netbox.TokenMetadata
+	findErr    error
+	created    netbox.ProvisionResult
+	createErr  error
+	deleteErrs []error
+	deletes    []deleteCall
+}
+
+func (m *fakeTokenManager) FindToken(_ context.Context, _, _ string, _ bool) (netbox.TokenMetadata, error) {
+	return m.findResult, m.findErr
+}
+func (m *fakeTokenManager) CreateToken(_ context.Context, _, _ string, _ bool) (netbox.ProvisionResult, error) {
+	return m.created, m.createErr
+}
+func (m *fakeTokenManager) DeleteToken(_ context.Context, _ string, token string, _ bool, id int) error {
+	m.deletes = append(m.deletes, deleteCall{token: token, id: id})
+	index := len(m.deletes) - 1
+	if index < len(m.deleteErrs) {
+		return m.deleteErrs[index]
+	}
+	return nil
+}
+
 func (p *fakeProvisioner) Provision(_ context.Context, _, _, _ string, insecure bool) (netbox.ProvisionResult, error) {
 	p.calls = append(p.calls, insecure)
 	index := len(p.calls) - 1
@@ -91,7 +120,7 @@ func (p *fakeProvisioner) Provision(_ context.Context, _, _, _ string, insecure 
 func TestLoginStoresTokenButDoesNotPrintIt(t *testing.T) {
 	configs := &memoryConfigStore{cfg: config.Config{Profiles: map[string]config.Profile{}}}
 	tokens := &memoryTokenStore{}
-	api := &fakeProvisioner{results: []netbox.ProvisionResult{{Token: "nbt_key.secret", Version: 2}}, errors: []error{nil}}
+	api := &fakeProvisioner{results: []netbox.ProvisionResult{{ID: 12, Token: "nbt_key.secret", Version: 2}}, errors: []error{nil}}
 	deps := dependencies{
 		configs: configs,
 		tokens:  tokens,
@@ -105,7 +134,7 @@ func TestLoginStoresTokenButDoesNotPrintIt(t *testing.T) {
 	if tokens.values["lab"] != "nbt_key.secret" {
 		t.Fatalf("stored token = %q", tokens.values["lab"])
 	}
-	if got := configs.cfg.Profiles["lab"]; got.BaseURL != "https://netbox.example" || got.TokenVersion != 2 || got.InsecureTLS {
+	if got := configs.cfg.Profiles["lab"]; got.BaseURL != "https://netbox.example" || got.TokenVersion != 2 || got.RemoteTokenID != 12 || got.InsecureTLS {
 		t.Fatalf("saved profile = %#v", got)
 	}
 	if strings.Contains(out.String(), "nbt_key.secret") || !strings.Contains(out.String(), "stored securely") {
@@ -289,5 +318,118 @@ func TestRemoveProfileReportsKeychainFailureAfterSavingConfiguration(t *testing.
 	}
 	if _, ok := configs.cfg.Profiles["lab"]; ok || configs.cfg.CurrentProfile != "" || tokens.values["lab"] != "secret" {
 		t.Fatalf("config=%#v tokens=%#v", configs.cfg, tokens.values)
+	}
+}
+
+func TestRotateTokenReplacesLocalCredentialBeforeRevokingPreviousToken(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{
+		"lab": {BaseURL: "https://netbox.example", TokenVersion: 2, RemoteTokenID: 7},
+	}}}
+	tokens := &memoryTokenStore{values: map[string]string{"lab": "nbt_oldkey.oldsecret"}}
+	manager := &fakeTokenManager{created: netbox.ProvisionResult{ID: 8, Version: 2, Token: "nbt_newkey.newsecret"}}
+	var out bytes.Buffer
+	err := rotateToken(context.Background(), &out, dependencies{configs: configs, tokens: tokens, tokenAPI: manager}, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tokens.values["lab"]; got != "nbt_newkey.newsecret" {
+		t.Fatalf("stored token = %q", got)
+	}
+	profile := configs.cfg.Profiles["lab"]
+	if profile.TokenVersion != 2 || profile.RemoteTokenID != 8 {
+		t.Fatalf("profile = %#v", profile)
+	}
+	if got := manager.deletes; len(got) != 1 || got[0] != (deleteCall{token: "nbt_newkey.newsecret", id: 7}) {
+		t.Fatalf("deletes = %#v", got)
+	}
+	if got := out.String(); got != "Rotated token for profile \"lab\".\n" || strings.Contains(got, "secret") {
+		t.Fatalf("output = %q", got)
+	}
+}
+
+func TestRotateTokenRestoresOldCredentialWhenProfileSaveFails(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{Profiles: map[string]config.Profile{
+		"lab": {BaseURL: "https://netbox.example", TokenVersion: 2, RemoteTokenID: 7},
+	}}, saveErr: errors.New("disk full")}
+	tokens := &memoryTokenStore{values: map[string]string{"lab": "nbt_oldkey.oldsecret"}}
+	manager := &fakeTokenManager{created: netbox.ProvisionResult{ID: 8, Version: 2, Token: "nbt_newkey.newsecret"}}
+	err := rotateToken(context.Background(), &bytes.Buffer{}, dependencies{configs: configs, tokens: tokens, tokenAPI: manager}, "lab", true)
+	if err == nil || !strings.Contains(err.Error(), "save replacement profile") {
+		t.Fatalf("rotateToken() error = %v", err)
+	}
+	if got := tokens.values["lab"]; got != "nbt_oldkey.oldsecret" {
+		t.Fatalf("stored token = %q", got)
+	}
+	if got := manager.deletes; len(got) != 1 || got[0] != (deleteCall{token: "nbt_oldkey.oldsecret", id: 8}) {
+		t.Fatalf("deletes = %#v", got)
+	}
+}
+
+func TestRotateTokenKeepsReplacementWhenPreviousRevocationFails(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{Profiles: map[string]config.Profile{
+		"lab": {BaseURL: "https://netbox.example", TokenVersion: 2, RemoteTokenID: 7},
+	}}}
+	tokens := &memoryTokenStore{values: map[string]string{"lab": "nbt_oldkey.oldsecret"}}
+	manager := &fakeTokenManager{
+		created:    netbox.ProvisionResult{ID: 8, Version: 2, Token: "nbt_newkey.newsecret"},
+		deleteErrs: []error{errors.New("permission denied")},
+	}
+	err := rotateToken(context.Background(), &bytes.Buffer{}, dependencies{configs: configs, tokens: tokens, tokenAPI: manager}, "lab", true)
+	if err == nil || !strings.Contains(err.Error(), "replacement token is saved") {
+		t.Fatalf("rotateToken() error = %v", err)
+	}
+	if tokens.values["lab"] != "nbt_newkey.newsecret" || configs.cfg.Profiles["lab"].RemoteTokenID != 8 {
+		t.Fatalf("token=%q profile=%#v", tokens.values["lab"], configs.cfg.Profiles["lab"])
+	}
+}
+
+func TestRevokeTokenRemovesRemoteAndLocalProfile(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{
+		"lab": {BaseURL: "https://netbox.example", TokenVersion: 2, RemoteTokenID: 7},
+	}}}
+	tokens := &memoryTokenStore{values: map[string]string{"lab": "nbt_key.secret"}}
+	manager := &fakeTokenManager{}
+	var out bytes.Buffer
+	err := revokeToken(context.Background(), &out, dependencies{configs: configs, tokens: tokens, tokenAPI: manager}, "lab", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manager.deletes; len(got) != 1 || got[0] != (deleteCall{token: "nbt_key.secret", id: 7}) {
+		t.Fatalf("deletes = %#v", got)
+	}
+	if _, ok := configs.cfg.Profiles["lab"]; ok || configs.cfg.CurrentProfile != "" {
+		t.Fatalf("config = %#v", configs.cfg)
+	}
+	if _, ok := tokens.values["lab"]; ok || out.String() != "Removed profile \"lab\".\n" {
+		t.Fatalf("tokens=%#v output=%q", tokens.values, out.String())
+	}
+}
+
+func TestRevokeTokenPreservesLocalProfileWhenRemoteRevocationFails(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{
+		"lab": {BaseURL: "https://netbox.example", TokenVersion: 2, RemoteTokenID: 7},
+	}}}
+	tokens := &memoryTokenStore{values: map[string]string{"lab": "nbt_key.secret"}}
+	manager := &fakeTokenManager{deleteErrs: []error{errors.New("permission denied")}}
+	err := revokeToken(context.Background(), &bytes.Buffer{}, dependencies{configs: configs, tokens: tokens, tokenAPI: manager}, "lab", true)
+	if err == nil || !strings.Contains(err.Error(), "revoke NetBox token") {
+		t.Fatalf("revokeToken() error = %v", err)
+	}
+	if _, ok := configs.cfg.Profiles["lab"]; !ok || tokens.values["lab"] != "nbt_key.secret" {
+		t.Fatalf("config=%#v tokens=%#v", configs.cfg, tokens.values)
+	}
+}
+
+func TestTokenLifecycleRejectsLegacyTokenWithoutRemoteChanges(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{Profiles: map[string]config.Profile{
+		"lab": {BaseURL: "https://netbox.example", TokenVersion: 1, RemoteTokenID: 7},
+	}}}
+	manager := &fakeTokenManager{}
+	err := revokeToken(context.Background(), &bytes.Buffer{}, dependencies{configs: configs, tokens: &memoryTokenStore{values: map[string]string{"lab": "legacy"}}, tokenAPI: manager}, "lab", true)
+	if err == nil || !strings.Contains(err.Error(), "require a NetBox v2 token") {
+		t.Fatalf("revokeToken() error = %v", err)
+	}
+	if len(manager.deletes) != 0 {
+		t.Fatalf("deletes = %#v", manager.deletes)
 	}
 }

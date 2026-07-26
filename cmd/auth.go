@@ -106,9 +106,10 @@ func login(ctx context.Context, out interface{ Write([]byte) (int, error) }, dep
 	}
 
 	cfg.Profiles[profileName] = config.Profile{
-		BaseURL:      baseURL,
-		TokenVersion: result.Version,
-		InsecureTLS:  insecure,
+		BaseURL:       baseURL,
+		TokenVersion:  result.Version,
+		RemoteTokenID: result.ID,
+		InsecureTLS:   insecure,
 	}
 	cfg.CurrentProfile = profileName
 	if err := deps.configs.Save(cfg); err != nil {
@@ -161,8 +162,154 @@ func newTokenCmd(deps dependencies) *cobra.Command {
 		},
 	}
 	show.Flags().StringVar(&profileName, "profile", "", "saved NetBox profile to use")
-	token.AddCommand(show)
+
+	var rotateProfile string
+	var rotateYes bool
+	rotate := &cobra.Command{
+		Use:   "rotate",
+		Short: "Replace a saved v2 API token and revoke the previous token",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return rotateToken(cmd.Context(), cmd.OutOrStdout(), deps, rotateProfile, rotateYes)
+		},
+	}
+	rotate.Flags().StringVar(&rotateProfile, "profile", "", "saved NetBox profile to use")
+	rotate.Flags().BoolVarP(&rotateYes, "yes", "y", false, "confirm rotation without prompting")
+
+	var revokeProfile string
+	var revokeYes bool
+	revoke := &cobra.Command{
+		Use:   "revoke",
+		Short: "Revoke a saved v2 API token and remove its profile",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return revokeToken(cmd.Context(), cmd.OutOrStdout(), deps, revokeProfile, revokeYes)
+		},
+	}
+	revoke.Flags().StringVar(&revokeProfile, "profile", "", "saved NetBox profile to use")
+	revoke.Flags().BoolVarP(&revokeYes, "yes", "y", false, "confirm revocation without prompting")
+
+	token.AddCommand(show, rotate, revoke)
 	return token
+}
+
+func rotateToken(ctx context.Context, out io.Writer, deps dependencies, selectedProfile string, yes bool) error {
+	name, profile, oldToken, oldID, err := lifecycleConnection(ctx, deps, selectedProfile)
+	if err != nil {
+		return err
+	}
+	if !yes {
+		if err := confirmDestructiveAction(deps.prompt, fmt.Sprintf("Rotate token for profile %q and revoke its previous token", name)); err != nil {
+			return err
+		}
+	}
+
+	created, err := deps.tokenAPI.CreateToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS)
+	if err != nil {
+		return fmt.Errorf("create replacement NetBox token: %w", err)
+	}
+	if created.Version != 2 {
+		if created.ID <= 0 {
+			return errors.New("NetBox did not create a v2 token and omitted its ID; revoke the replacement token manually")
+		}
+		cleanupErr := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS, created.ID)
+		if cleanupErr != nil {
+			return fmt.Errorf("NetBox did not create a v2 token and cleanup failed: %w", cleanupErr)
+		}
+		return errors.New("NetBox did not create a v2 token; token lifecycle commands require NetBox v2 tokens")
+	}
+	if created.ID <= 0 {
+		return errors.New("NetBox created a replacement token without an ID; refusing to replace the saved token")
+	}
+	if err := deps.tokens.Set(name, created.Token); err != nil {
+		cleanupErr := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS, created.ID)
+		if cleanupErr != nil {
+			return fmt.Errorf("store replacement token in OS keychain: %w (remote cleanup also failed: %v)", err, cleanupErr)
+		}
+		return fmt.Errorf("store replacement token in OS keychain: %w", err)
+	}
+
+	cfg, err := deps.configs.Load()
+	if err != nil {
+		_ = deps.tokens.Set(name, oldToken)
+		_ = deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS, created.ID)
+		return fmt.Errorf("load profiles after creating replacement token: %w", err)
+	}
+	updated := cfg.Profiles[name]
+	updated.TokenVersion = created.Version
+	updated.RemoteTokenID = created.ID
+	cfg.Profiles[name] = updated
+	if err := deps.configs.Save(cfg); err != nil {
+		_ = deps.tokens.Set(name, oldToken)
+		cleanupErr := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS, created.ID)
+		if cleanupErr != nil {
+			return fmt.Errorf("save replacement profile: %w (remote cleanup also failed: %v)", err, cleanupErr)
+		}
+		return fmt.Errorf("save replacement profile: %w", err)
+	}
+	if err := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, created.Token, profile.InsecureTLS, oldID); err != nil {
+		return fmt.Errorf("replacement token is saved, but revoking the previous NetBox token failed: %w", err)
+	}
+	_, err = fmt.Fprintf(out, "Rotated token for profile %q.\n", name)
+	return err
+}
+
+func revokeToken(ctx context.Context, out io.Writer, deps dependencies, selectedProfile string, yes bool) error {
+	name, profile, token, tokenID, err := lifecycleConnection(ctx, deps, selectedProfile)
+	if err != nil {
+		return err
+	}
+	if !yes {
+		if err := confirmDestructiveAction(deps.prompt, fmt.Sprintf("Revoke token for profile %q and remove its local profile", name)); err != nil {
+			return err
+		}
+	}
+	if err := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, token, profile.InsecureTLS, tokenID); err != nil {
+		return fmt.Errorf("revoke NetBox token: %w", err)
+	}
+	if err := removeProfile(out, deps, name, true); err != nil {
+		return fmt.Errorf("NetBox token was revoked, but remove local profile: %w", err)
+	}
+	return nil
+}
+
+func lifecycleConnection(ctx context.Context, deps dependencies, selectedProfile string) (string, config.Profile, string, int, error) {
+	if deps.tokenAPI == nil {
+		return "", config.Profile{}, "", 0, errors.New("token lifecycle is not configured")
+	}
+	cfg, err := deps.configs.Load()
+	if err != nil {
+		return "", config.Profile{}, "", 0, fmt.Errorf("load profiles: %w", err)
+	}
+	name := selectedProfile
+	if name == "" {
+		name = defaultProfile(cfg)
+	}
+	if err := config.ValidateProfileName(name); err != nil {
+		return "", config.Profile{}, "", 0, err
+	}
+	profile, ok := cfg.Profiles[name]
+	if !ok {
+		return "", config.Profile{}, "", 0, fmt.Errorf("profile %q does not exist", name)
+	}
+	token, err := deps.tokens.Get(name)
+	if err != nil {
+		return "", config.Profile{}, "", 0, fmt.Errorf("retrieve token from OS keychain: %w", err)
+	}
+	if !strings.HasPrefix(token, "nbt_") {
+		return "", config.Profile{}, "", 0, errors.New("token lifecycle commands require a NetBox v2 token; log in again to create one")
+	}
+	if profile.RemoteTokenID > 0 {
+		return name, profile, token, profile.RemoteTokenID, nil
+	}
+	metadata, err := deps.tokenAPI.FindToken(ctx, profile.BaseURL, token, profile.InsecureTLS)
+	if err != nil {
+		return "", config.Profile{}, "", 0, fmt.Errorf("identify saved NetBox token: %w", err)
+	}
+	if metadata.Version != 2 || metadata.ID <= 0 {
+		return "", config.Profile{}, "", 0, errors.New("saved NetBox token is not a v2 token")
+	}
+	return name, profile, token, metadata.ID, nil
 }
 
 type profileView struct {

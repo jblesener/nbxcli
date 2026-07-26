@@ -16,6 +16,7 @@ type dependencies struct {
 	configs   config.Store
 	tokens    tokenstore.Store
 	api       netbox.Provisioner
+	tokenAPI  netbox.TokenManager
 	resources netbox.ResourceReader
 	prompt    prompt.Prompter
 }
@@ -30,6 +31,7 @@ func defaultDependencies(in io.Reader, out io.Writer) (dependencies, error) {
 		configs:   configs,
 		tokens:    tokenstore.NewKeyringStore(),
 		api:       client,
+		tokenAPI:  client,
 		resources: client,
 		prompt:    prompt.New(in, out),
 	}, nil

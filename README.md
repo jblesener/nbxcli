@@ -42,6 +42,24 @@ nbxcli auth token show --profile production
 
 The command writes only the token and a trailing newline to standard output. Treat its output as a secret. Tokens are never printed by `auth login`. Re-running login for a profile creates another token in NetBox and replaces only the token held locally by `nbxcli`.
 
+Rotate a saved v2 token without exposing it. The replacement is stored before
+the prior remote token is revoked; if the final revocation fails, the new token
+remains usable and the command reports that the old token still needs cleanup.
+
+```sh
+nbxcli auth token rotate --profile production
+nbxcli auth token rotate --profile production --yes
+```
+
+Revoke a saved v2 token remotely and remove its local profile and keychain
+credential. Both lifecycle commands prompt before revoking a token, or require
+`--yes` when standard input is non-interactive. Legacy v1 tokens cannot be
+identified safely for lifecycle actions; log in again to create a v2 token.
+
+```sh
+nbxcli auth token revoke --profile retired-lab
+```
+
 ## Query NetBox resources
 
 List the first-party model resources exposed by the current NetBox instance:

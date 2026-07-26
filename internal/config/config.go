@@ -15,9 +15,10 @@ var profileNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // Profile contains non-secret connection metadata. API tokens belong in the OS keychain.
 type Profile struct {
-	BaseURL      string `json:"base_url"`
-	TokenVersion int    `json:"token_version"`
-	InsecureTLS  bool   `json:"insecure_tls,omitempty"`
+	BaseURL       string `json:"base_url"`
+	TokenVersion  int    `json:"token_version"`
+	RemoteTokenID int    `json:"remote_token_id,omitempty"`
+	InsecureTLS   bool   `json:"insecure_tls,omitempty"`
 }
 
 type Config struct {

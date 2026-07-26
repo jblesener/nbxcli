@@ -241,17 +241,17 @@ func confirmDestructiveAction(prompter interface {
 	Confirm(string, bool) (bool, error)
 }, label string) error {
 	if prompter == nil {
-		return errors.New("deletion requires --yes when no interactive prompt is available")
+		return errors.New("this action requires --yes when no interactive prompt is available")
 	}
 	if interactive, ok := prompter.(interface{ Interactive() bool }); ok && !interactive.Interactive() {
-		return errors.New("deletion requires --yes when stdin is not an interactive terminal")
+		return errors.New("this action requires --yes when stdin is not an interactive terminal")
 	}
 	confirmed, err := prompter.Confirm(label, false)
 	if err != nil {
 		return err
 	}
 	if !confirmed {
-		return errors.New("deletion cancelled")
+		return errors.New("action cancelled")
 	}
 	return nil
 }

@@ -12,7 +12,7 @@ func TestFileStoreRoundTripUsesPrivatePermissions(t *testing.T) {
 	want := Config{
 		CurrentProfile: "lab",
 		Profiles: map[string]Profile{
-			"lab": {BaseURL: "https://netbox.example", TokenVersion: 2, InsecureTLS: true},
+			"lab": {BaseURL: "https://netbox.example", TokenVersion: 2, RemoteTokenID: 7, InsecureTLS: true},
 		},
 	}
 	if err := store.Save(want); err != nil {
