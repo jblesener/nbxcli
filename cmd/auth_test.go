@@ -28,7 +28,10 @@ func (s *memoryConfigStore) Save(cfg config.Config) error {
 	return nil
 }
 
-type memoryTokenStore struct{ values map[string]string }
+type memoryTokenStore struct {
+	values    map[string]string
+	deleteErr error
+}
 
 func (s *memoryTokenStore) Set(profile, value string) error {
 	if s.values == nil {
@@ -44,7 +47,13 @@ func (s *memoryTokenStore) Get(profile string) (string, error) {
 	}
 	return value, nil
 }
-func (s *memoryTokenStore) Delete(profile string) error { delete(s.values, profile); return nil }
+func (s *memoryTokenStore) Delete(profile string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	delete(s.values, profile)
+	return nil
+}
 
 type scriptedPrompt struct {
 	strings  []string
@@ -206,4 +215,79 @@ func TestTokenShowUsesCurrentProfileAndRejectsMissingToken(t *testing.T) {
 			t.Fatalf("stdout = %q", got)
 		}
 	})
+}
+
+func TestProfileCommandsManageNonSecretMetadata(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{
+		CurrentProfile: "lab",
+		Profiles: map[string]config.Profile{
+			"lab":  {BaseURL: "https://lab.example", TokenVersion: 2},
+			"prod": {BaseURL: "https://prod.example", TokenVersion: 1, InsecureTLS: true},
+		},
+	}}
+	tokens := &memoryTokenStore{values: map[string]string{"lab": "lab-secret", "prod": "prod-secret"}}
+	deps := dependencies{configs: configs, tokens: tokens, prompt: &scriptedPrompt{confirms: []bool{true}}}
+
+	t.Run("list is sorted and secret free", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := listProfiles(&out, deps, "json"); err != nil {
+			t.Fatal(err)
+		}
+		if got := out.String(); !strings.Contains(got, `"name":"lab"`) || strings.Contains(got, "secret") || strings.Index(got, `"name":"lab"`) > strings.Index(got, `"name":"prod"`) {
+			t.Fatalf("output = %q", got)
+		}
+	})
+	t.Run("show current profile", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := showProfile(&out, deps, "lab", "json"); err != nil {
+			t.Fatal(err)
+		}
+		if got := out.String(); !strings.Contains(got, `"current":true`) || strings.Contains(got, "secret") {
+			t.Fatalf("output = %q", got)
+		}
+	})
+	t.Run("use changes current profile", func(t *testing.T) {
+		if err := useProfile(&bytes.Buffer{}, deps, "prod"); err != nil {
+			t.Fatal(err)
+		}
+		if configs.cfg.CurrentProfile != "prod" {
+			t.Fatalf("current profile = %q", configs.cfg.CurrentProfile)
+		}
+	})
+	t.Run("remove clears current profile and token", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := removeProfile(&out, deps, "prod", false); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := configs.cfg.Profiles["prod"]; ok || configs.cfg.CurrentProfile != "" {
+			t.Fatalf("config = %#v", configs.cfg)
+		}
+		if _, ok := tokens.values["prod"]; ok || out.String() != "Removed profile \"prod\".\n" {
+			t.Fatalf("tokens=%#v output=%q", tokens.values, out.String())
+		}
+	})
+}
+
+func TestRemoveProfilePreservesConfigurationWhenSaveFails(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{"lab": {BaseURL: "https://lab.example"}}}, saveErr: errors.New("disk full")}
+	tokens := &memoryTokenStore{values: map[string]string{"lab": "secret"}}
+	err := removeProfile(&bytes.Buffer{}, dependencies{configs: configs, tokens: tokens}, "lab", true)
+	if err == nil {
+		t.Fatal("removeProfile succeeded")
+	}
+	if _, ok := configs.cfg.Profiles["lab"]; !ok || tokens.values["lab"] != "secret" {
+		t.Fatalf("config=%#v tokens=%#v", configs.cfg, tokens.values)
+	}
+}
+
+func TestRemoveProfileReportsKeychainFailureAfterSavingConfiguration(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{"lab": {BaseURL: "https://lab.example"}}}}
+	tokens := &memoryTokenStore{values: map[string]string{"lab": "secret"}, deleteErr: errors.New("keychain unavailable")}
+	err := removeProfile(&bytes.Buffer{}, dependencies{configs: configs, tokens: tokens}, "lab", true)
+	if err == nil {
+		t.Fatal("removeProfile succeeded")
+	}
+	if _, ok := configs.cfg.Profiles["lab"]; ok || configs.cfg.CurrentProfile != "" || tokens.values["lab"] != "secret" {
+		t.Fatalf("config=%#v tokens=%#v", configs.cfg, tokens.values)
+	}
 }

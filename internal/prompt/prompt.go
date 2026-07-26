@@ -23,6 +23,12 @@ type Terminal struct {
 	fd       func() (int, bool)
 }
 
+// Interactive reports whether the prompt is attached to an interactive terminal.
+func (t *Terminal) Interactive() bool {
+	fd, ok := t.fd()
+	return ok && term.IsTerminal(fd)
+}
+
 func New(in io.Reader, out io.Writer) *Terminal {
 	t := &Terminal{in: bufio.NewReader(in), out: out, password: term.ReadPassword}
 	if file, ok := in.(interface{ Fd() uintptr }); ok {

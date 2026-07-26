@@ -2,8 +2,10 @@ package netbox
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -124,5 +126,140 @@ func TestResourceQueriesRejectInvalidInput(t *testing.T) {
 	}
 	if _, err := client.GetResource(context.Background(), "https://netbox.example", "token", false, "dcim.devices", 0); err == nil {
 		t.Fatal("GetResource() succeeded with zero ID")
+	}
+}
+
+func TestCreateResourcePostsJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/":
+			_, _ = w.Write([]byte(`{"dcim":"dcim/"}`))
+		case "/api/dcim/":
+			_, _ = w.Write([]byte(`{"devices":"devices/"}`))
+		case "/api/dcim/devices/":
+			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer nbt_key.secret" || r.Header.Get("Content-Type") != "application/json" {
+				t.Fatalf("request = %s auth=%q content-type=%q", r.Method, r.Header.Get("Authorization"), r.Header.Get("Content-Type"))
+			}
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["name"] != "leaf-01" {
+				t.Fatalf("body=%#v err=%v", body, err)
+			}
+			_, _ = w.Write([]byte(`{"id":1,"name":"leaf-01"}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	record, err := NewClient().CreateResource(context.Background(), server.URL, "nbt_key.secret", false, "dcim.devices", json.RawMessage(`{"name":"leaf-01"}`))
+	if err != nil || string(record) != `{"id":1,"name":"leaf-01"}` {
+		t.Fatalf("CreateResource() = %s, %v", record, err)
+	}
+}
+
+func TestUpdateResourceUsesETag(t *testing.T) {
+	patchCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/":
+			_, _ = w.Write([]byte(`{"dcim":"dcim/"}`))
+		case "/api/dcim/":
+			_, _ = w.Write([]byte(`{"devices":"devices/"}`))
+		case "/api/dcim/devices/42/":
+			switch r.Method {
+			case http.MethodGet:
+				w.Header().Set("ETag", `W/"2026-01-01T00:00:00Z"`)
+				_, _ = w.Write([]byte(`{"id":42,"name":"old"}`))
+			case http.MethodPatch:
+				patchCalled = true
+				if got := r.Header.Get("If-Match"); got != `W/"2026-01-01T00:00:00Z"` {
+					t.Fatalf("If-Match = %q", got)
+				}
+				_, _ = w.Write([]byte(`{"id":42,"name":"new"}`))
+			default:
+				t.Fatalf("method = %s", r.Method)
+			}
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	record, err := NewClient().UpdateResource(context.Background(), server.URL, "token", false, "dcim.devices", 42, json.RawMessage(`{"name":"new"}`))
+	if err != nil || !patchCalled || string(record) != `{"id":42,"name":"new"}` {
+		t.Fatalf("UpdateResource() = %s, %v; patch=%v", record, err, patchCalled)
+	}
+}
+
+func TestUpdateResourceRejectsMissingETagAndConflict(t *testing.T) {
+	t.Run("missing ETag", func(t *testing.T) {
+		patchCalled := false
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/":
+				_, _ = w.Write([]byte(`{"dcim":"dcim/"}`))
+			case "/api/dcim/":
+				_, _ = w.Write([]byte(`{"devices":"devices/"}`))
+			case "/api/dcim/devices/42/":
+				if r.Method == http.MethodPatch {
+					patchCalled = true
+				}
+				_, _ = w.Write([]byte(`{"id":42}`))
+			}
+		}))
+		defer server.Close()
+		_, err := NewClient().UpdateResource(context.Background(), server.URL, "token", false, "dcim.devices", 42, json.RawMessage(`{"name":"new"}`))
+		if err == nil || !strings.Contains(err.Error(), "did not return an ETag") || patchCalled {
+			t.Fatalf("error=%v patch=%v", err, patchCalled)
+		}
+	})
+	t.Run("conflict", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/":
+				_, _ = w.Write([]byte(`{"dcim":"dcim/"}`))
+			case "/api/dcim/":
+				_, _ = w.Write([]byte(`{"devices":"devices/"}`))
+			case "/api/dcim/devices/42/":
+				if r.Method == http.MethodGet {
+					w.Header().Set("ETag", `W/"old"`)
+					_, _ = w.Write([]byte(`{"id":42}`))
+					return
+				}
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`{"detail":"Record has changed."}`))
+			}
+		}))
+		defer server.Close()
+		_, err := NewClient().UpdateResource(context.Background(), server.URL, "token", false, "dcim.devices", 42, json.RawMessage(`{"name":"new"}`))
+		if err == nil || !strings.Contains(err.Error(), "HTTP 412") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+}
+
+func TestDeleteResourceUsesDetailEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/":
+			_, _ = w.Write([]byte(`{"ipam":"ipam/"}`))
+		case "/api/ipam/":
+			_, _ = w.Write([]byte(`{"prefixes":"prefixes/"}`))
+		case "/api/ipam/prefixes/4/":
+			if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Token token" {
+				t.Fatalf("request = %s auth=%q", r.Method, r.Header.Get("Authorization"))
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	if err := NewClient().DeleteResource(context.Background(), server.URL, "token", false, "ipam.prefixes", 4); err != nil {
+		t.Fatal(err)
 	}
 }

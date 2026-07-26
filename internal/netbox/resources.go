@@ -1,6 +1,7 @@
 package netbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -39,6 +40,9 @@ type ResourceReader interface {
 	ListResources(context.Context, string, string, bool) ([]Resource, error)
 	ListResource(context.Context, string, string, bool, string, ResourceQuery) ([]json.RawMessage, error)
 	GetResource(context.Context, string, string, bool, string, int) (json.RawMessage, error)
+	CreateResource(context.Context, string, string, bool, string, json.RawMessage) (json.RawMessage, error)
+	UpdateResource(context.Context, string, string, bool, string, int, json.RawMessage) (json.RawMessage, error)
+	DeleteResource(context.Context, string, string, bool, string, int) error
 }
 
 // ListResources discovers first-party model collection endpoints. Plugin endpoints
@@ -144,6 +148,69 @@ func (c *Client) GetResource(ctx context.Context, baseURL, token string, insecur
 	return json.RawMessage(body), nil
 }
 
+// CreateResource creates one record using a JSON object payload.
+func (c *Client) CreateResource(ctx context.Context, baseURL, token string, insecureTLS bool, resource string, payload json.RawMessage) (json.RawMessage, error) {
+	if err := validateResourcePayload(payload); err != nil {
+		return nil, err
+	}
+	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, insecureTLS, resource)
+	if err != nil {
+		return nil, err
+	}
+	body, _, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodPost, endpoint, payload, "")
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(body) {
+		return nil, errors.New("decode NetBox resource response: invalid JSON")
+	}
+	return json.RawMessage(body), nil
+}
+
+// UpdateResource applies a partial update guarded by the record's current ETag.
+func (c *Client) UpdateResource(ctx context.Context, baseURL, token string, insecureTLS bool, resource string, id int, payload json.RawMessage) (json.RawMessage, error) {
+	if id <= 0 {
+		return nil, errors.New("resource ID must be positive")
+	}
+	if err := validateResourcePayload(payload); err != nil {
+		return nil, err
+	}
+	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, insecureTLS, resource)
+	if err != nil {
+		return nil, err
+	}
+	detailEndpoint := endpoint + strconv.Itoa(id) + "/"
+	_, headers, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodGet, detailEndpoint, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	etag := headers.Get("ETag")
+	if etag == "" {
+		return nil, errors.New("NetBox did not return an ETag; refusing an unguarded update")
+	}
+	body, _, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodPatch, detailEndpoint, payload, etag)
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(body) {
+		return nil, errors.New("decode NetBox resource response: invalid JSON")
+	}
+	return json.RawMessage(body), nil
+}
+
+// DeleteResource deletes one record by positive numeric ID.
+func (c *Client) DeleteResource(ctx context.Context, baseURL, token string, insecureTLS bool, resource string, id int) error {
+	if id <= 0 {
+		return errors.New("resource ID must be positive")
+	}
+	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, insecureTLS, resource)
+	if err != nil {
+		return err
+	}
+	_, _, err = c.request(ctx, baseURL, token, insecureTLS, http.MethodDelete, endpoint+strconv.Itoa(id)+"/", nil, "")
+	return err
+}
+
 func (c *Client) resourceEndpoint(ctx context.Context, baseURL, token string, insecureTLS bool, resource string) (string, error) {
 	app, model, ok := strings.Cut(resource, ".")
 	if !ok || !validSegment(app) || !validSegment(model) || strings.Contains(model, ".") {
@@ -174,11 +241,26 @@ func (c *Client) getMap(ctx context.Context, baseURL, token string, insecureTLS 
 }
 
 func (c *Client) get(ctx context.Context, baseURL, token string, insecureTLS bool, endpoint string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	body, _, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodGet, endpoint, nil, "")
+	return body, err
+}
+
+func (c *Client) request(ctx context.Context, baseURL, token string, insecureTLS bool, method, endpoint string, payload []byte, ifMatch string) ([]byte, http.Header, error) {
+	var bodyReader io.Reader
+	if payload != nil {
+		bodyReader = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bodyReader)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if ifMatch != "" {
+		req.Header.Set("If-Match", ifMatch)
+	}
 	if strings.HasPrefix(token, "nbt_") {
 		req.Header.Set("Authorization", "Bearer "+token)
 	} else {
@@ -191,17 +273,25 @@ func (c *Client) get(ctx context.Context, baseURL, token string, insecureTLS boo
 	client := &http.Client{Transport: transport, Timeout: c.timeout}
 	response, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	response.Body.Close()
 	if readErr != nil {
-		return nil, readErr
+		return nil, nil, readErr
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, apiError(response.StatusCode, body)
+		return nil, nil, apiError(response.StatusCode, body)
 	}
-	return body, nil
+	return body, response.Header, nil
+}
+
+func validateResourcePayload(payload json.RawMessage) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
+		return errors.New("resource payload must be a JSON object")
+	}
+	return nil
 }
 
 func validSegment(value string) bool {

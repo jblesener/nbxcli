@@ -42,7 +42,7 @@ func newRootCmd(deps dependencies) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newAuthCmd(deps), newGetCmd(deps), newResourcesCmd(deps))
+	root.AddCommand(newAuthCmd(deps), newGetCmd(deps), newCreateCmd(deps), newUpdateCmd(deps), newDeleteCmd(deps), newResourcesCmd(deps))
 	return root
 }
 

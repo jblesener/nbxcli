@@ -59,6 +59,55 @@ nbxcli get ipam.prefixes 42
 
 The default output is a compact `ID`, `DISPLAY`, and `STATUS` table. Use `--output json` for complete API records suitable for scripts. Add `--profile NAME` to query a saved profile other than the current one; repeat `--filter key=value` to pass additional NetBox list filters through to the API. List-only flags (`--search`, `--filter`, and `--limit`) cannot be used when retrieving an individual record.
 
+## Manage NetBox resources
+
+Create a resource with an inline JSON object or a JSON file prefixed with `@`:
+
+```sh
+nbxcli create dcim.devices --data '{"name":"leaf-01","device_type":12,"role":4,"site":3}'
+nbxcli create ipam.prefixes --data @prefix.json --output json
+```
+
+Apply a partial update to one record:
+
+```sh
+nbxcli update dcim.devices 42 --data '{"status":"active"}'
+```
+
+Updates first read the record and use its NetBox ETag to prevent overwriting a
+concurrent change. An instance that does not return ETags cannot be updated by
+this command.
+
+Delete one record after a confirmation prompt. Use `--yes` only when an
+automation workflow has made the deletion intentional:
+
+```sh
+nbxcli delete dcim.devices 42
+nbxcli delete dcim.devices 42 --yes
+```
+
+Creation and updates use the same `--output table|json` formatting as `get`.
+All mutation commands target one resource at a time and support only the
+first-party resources listed by `nbxcli resources`.
+
+## Manage profiles
+
+Saved profile metadata never includes the token. Inspect and switch profiles
+without logging in again:
+
+```sh
+nbxcli auth profile list
+nbxcli auth profile show production --output json
+nbxcli auth profile use production
+```
+
+Remove a profile and its OS-keychain token with a confirmation prompt (or
+explicitly use `--yes` for automation):
+
+```sh
+nbxcli auth profile remove retired-lab
+```
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).

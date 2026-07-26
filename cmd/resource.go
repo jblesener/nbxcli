@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -28,6 +29,17 @@ type resourceGetOptions struct {
 type resourcesOptions struct {
 	profile string
 	output  string
+}
+
+type resourceWriteOptions struct {
+	profile string
+	data    string
+	output  string
+}
+
+type resourceDeleteOptions struct {
+	profile string
+	yes     bool
 }
 
 func newGetCmd(deps dependencies) *cobra.Command {
@@ -61,6 +73,55 @@ func newResourcesCmd(deps dependencies) *cobra.Command {
 	resources.Flags().StringVar(&options.profile, "profile", "", "saved NetBox profile to use")
 	resources.Flags().StringVarP(&options.output, "output", "o", "table", "output format: table or json")
 	return resources
+}
+
+func newCreateCmd(deps dependencies) *cobra.Command {
+	options := resourceWriteOptions{output: "table"}
+	create := &cobra.Command{
+		Use:   "create RESOURCE",
+		Short: "Create a NetBox resource",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return createResource(cmd.Context(), cmd.OutOrStdout(), deps, args[0], options)
+		},
+	}
+	create.Flags().StringVar(&options.profile, "profile", "", "saved NetBox profile to use")
+	create.Flags().StringVar(&options.data, "data", "", "JSON object or @path to a JSON file")
+	create.Flags().StringVarP(&options.output, "output", "o", "table", "output format: table or json")
+	_ = create.MarkFlagRequired("data")
+	return create
+}
+
+func newUpdateCmd(deps dependencies) *cobra.Command {
+	options := resourceWriteOptions{output: "table"}
+	update := &cobra.Command{
+		Use:   "update RESOURCE ID",
+		Short: "Update a NetBox resource",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return updateResource(cmd.Context(), cmd.OutOrStdout(), deps, args[0], args[1], options)
+		},
+	}
+	update.Flags().StringVar(&options.profile, "profile", "", "saved NetBox profile to use")
+	update.Flags().StringVar(&options.data, "data", "", "JSON object or @path to a JSON file")
+	update.Flags().StringVarP(&options.output, "output", "o", "table", "output format: table or json")
+	_ = update.MarkFlagRequired("data")
+	return update
+}
+
+func newDeleteCmd(deps dependencies) *cobra.Command {
+	options := resourceDeleteOptions{}
+	delete := &cobra.Command{
+		Use:   "delete RESOURCE ID",
+		Short: "Delete a NetBox resource",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return deleteResource(cmd.Context(), cmd.OutOrStdout(), deps, args[0], args[1], options)
+		},
+	}
+	delete.Flags().StringVar(&options.profile, "profile", "", "saved NetBox profile to use")
+	delete.Flags().BoolVarP(&options.yes, "yes", "y", false, "confirm deletion without prompting")
+	return delete
 }
 
 func getResource(ctx context.Context, out io.Writer, deps dependencies, args []string, options resourceGetOptions, flags interface{ Changed(string) bool }) error {
@@ -102,6 +163,97 @@ func getResource(ctx context.Context, out io.Writer, deps dependencies, args []s
 		return fmt.Errorf("query NetBox resource: %w", err)
 	}
 	return writeResourceList(out, records, options.output)
+}
+
+func createResource(ctx context.Context, out io.Writer, deps dependencies, resource string, options resourceWriteOptions) error {
+	if deps.resources == nil {
+		return errors.New("resource queries are not configured")
+	}
+	if err := validateOutput(options.output); err != nil {
+		return err
+	}
+	payload, err := readResourcePayload(options.data)
+	if err != nil {
+		return err
+	}
+	profile, token, err := resourceConnection(deps, options.profile)
+	if err != nil {
+		return err
+	}
+	record, err := deps.resources.CreateResource(ctx, profile.BaseURL, token, profile.InsecureTLS, resource, payload)
+	if err != nil {
+		return fmt.Errorf("create NetBox resource: %w", err)
+	}
+	return writeResourceResult(out, record, options.output)
+}
+
+func updateResource(ctx context.Context, out io.Writer, deps dependencies, resource, rawID string, options resourceWriteOptions) error {
+	if deps.resources == nil {
+		return errors.New("resource queries are not configured")
+	}
+	if err := validateOutput(options.output); err != nil {
+		return err
+	}
+	id, err := parseResourceID(rawID)
+	if err != nil {
+		return err
+	}
+	payload, err := readResourcePayload(options.data)
+	if err != nil {
+		return err
+	}
+	profile, token, err := resourceConnection(deps, options.profile)
+	if err != nil {
+		return err
+	}
+	record, err := deps.resources.UpdateResource(ctx, profile.BaseURL, token, profile.InsecureTLS, resource, id, payload)
+	if err != nil {
+		return fmt.Errorf("update NetBox resource: %w", err)
+	}
+	return writeResourceResult(out, record, options.output)
+}
+
+func deleteResource(ctx context.Context, out io.Writer, deps dependencies, resource, rawID string, options resourceDeleteOptions) error {
+	if deps.resources == nil {
+		return errors.New("resource queries are not configured")
+	}
+	id, err := parseResourceID(rawID)
+	if err != nil {
+		return err
+	}
+	if !options.yes {
+		if err := confirmDestructiveAction(deps.prompt, fmt.Sprintf("Delete %s %d", resource, id)); err != nil {
+			return err
+		}
+	}
+	profile, token, err := resourceConnection(deps, options.profile)
+	if err != nil {
+		return err
+	}
+	if err := deps.resources.DeleteResource(ctx, profile.BaseURL, token, profile.InsecureTLS, resource, id); err != nil {
+		return fmt.Errorf("delete NetBox resource: %w", err)
+	}
+	_, err = fmt.Fprintf(out, "Deleted %s %d.\n", resource, id)
+	return err
+}
+
+func confirmDestructiveAction(prompter interface {
+	Confirm(string, bool) (bool, error)
+}, label string) error {
+	if prompter == nil {
+		return errors.New("deletion requires --yes when no interactive prompt is available")
+	}
+	if interactive, ok := prompter.(interface{ Interactive() bool }); ok && !interactive.Interactive() {
+		return errors.New("deletion requires --yes when stdin is not an interactive terminal")
+	}
+	confirmed, err := prompter.Confirm(label, false)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		return errors.New("deletion cancelled")
+	}
+	return nil
 }
 
 func listResources(ctx context.Context, out io.Writer, deps dependencies, options resourcesOptions) error {
@@ -172,6 +324,38 @@ func parseResourceFilters(values []string) ([]netbox.ResourceFilter, error) {
 		filters = append(filters, netbox.ResourceFilter{Key: key, Value: filterValue})
 	}
 	return filters, nil
+}
+
+func parseResourceID(value string) (int, error) {
+	id, err := strconv.Atoi(value)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid resource ID %q; use a positive integer", value)
+	}
+	return id, nil
+}
+
+func readResourcePayload(value string) (json.RawMessage, error) {
+	if value == "" {
+		return nil, errors.New("resource data cannot be empty")
+	}
+	data := []byte(value)
+	if strings.HasPrefix(value, "@") {
+		path := strings.TrimPrefix(value, "@")
+		if path == "" {
+			return nil, errors.New("resource data file path cannot be empty")
+		}
+		var err error
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read resource data file: %w", err)
+		}
+	}
+	data = []byte(strings.TrimSpace(string(data)))
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil || object == nil {
+		return nil, errors.New("resource data must be a JSON object")
+	}
+	return json.RawMessage(data), nil
 }
 
 func writeResourceList(out io.Writer, records []json.RawMessage, output string) error {
