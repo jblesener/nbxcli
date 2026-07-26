@@ -11,10 +11,10 @@ Start an interactive login to create a NetBox token and save it under a named pr
 nbxcli auth login
 ```
 
-The prompt collects the profile name, NetBox URL, username, and password. The token is stored in the operating-system credential manager; the local configuration contains only the URL, token version, TLS setting, and selected profile.
+The prompt collects the profile name, NetBox URL, username, and password. The token is stored in the operating-system credential manager; the local configuration contains only the URL, token version, optional certificate thumbprint, and selected profile.
 
 <div class="callout">
-Use the insecure TLS retry only for a trusted private environment. Certificate verification remains enabled by default.
+Certificate verification remains enabled by default. If it fails, `nbxcli` displays the server's SHA-256 leaf-certificate thumbprint and asks whether to trust it. Verify that value out of band before confirming: it is pinned to the profile, and future connections reject a different certificate. Profiles created with the former insecure-TLS option must be authenticated again to establish a pin.
 </div>
 
 ## Profiles

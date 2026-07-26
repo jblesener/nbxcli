@@ -34,7 +34,7 @@ nbxcli auth login
 
 The command prompts for a profile name, NetBox URL, username, and password. It calls NetBox's token-provisioning endpoint, saves the token in the operating system credential store, and saves only non-secret connection settings under the OS user config directory.
 
-If certificate validation fails, login can explicitly retry without verification for that profile. This should be used only with a trusted private development environment.
+If certificate validation fails, login displays the server's SHA-256 certificate thumbprint and asks for confirmation before trusting it. On confirmation, the thumbprint is pinned in the profile; future connections accept only that exact certificate. Verify the displayed value out of band before accepting it. Existing profiles that used the former insecure-TLS setting must be authenticated again to create a pin.
 
 To write a saved token for use in a script, invoke the explicit reveal command:
 

@@ -28,7 +28,7 @@ func TestListResourcesDiscoversFirstPartyModels(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resources, err := NewClient().ListResources(context.Background(), server.URL, "saved-token", false)
+	resources, err := NewClient().ListResources(context.Background(), server.URL, "saved-token", "")
 	if err != nil {
 		t.Fatalf("ListResources() error = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestListResourceAuthenticatesFiltersAndPaginates(t *testing.T) {
 	}))
 	defer server.Close()
 
-	records, err := NewClient().ListResource(context.Background(), server.URL, "saved-token", false, "dcim.devices", ResourceQuery{
+	records, err := NewClient().ListResource(context.Background(), server.URL, "saved-token", "", "dcim.devices", ResourceQuery{
 		Search: "edge", Filters: []ResourceFilter{{Key: "site", Value: "tokyo"}, {Key: "site", Value: "osaka"}}, Limit: 3,
 	})
 	if err != nil {
@@ -110,7 +110,7 @@ func TestGetResourceUsesBearerForV2Token(t *testing.T) {
 	}))
 	defer server.Close()
 
-	record, err := NewClient().GetResource(context.Background(), server.URL, "nbt_key.secret", false, "ipam.prefixes", 42)
+	record, err := NewClient().GetResource(context.Background(), server.URL, "nbt_key.secret", "", "ipam.prefixes", 42)
 	if err != nil {
 		t.Fatalf("GetResource() error = %v", err)
 	}
@@ -121,10 +121,10 @@ func TestGetResourceUsesBearerForV2Token(t *testing.T) {
 
 func TestResourceQueriesRejectInvalidInput(t *testing.T) {
 	client := NewClient()
-	if _, err := client.ListResource(context.Background(), "https://netbox.example", "token", false, "dcim.devices", ResourceQuery{}); err == nil {
+	if _, err := client.ListResource(context.Background(), "https://netbox.example", "token", "", "dcim.devices", ResourceQuery{}); err == nil {
 		t.Fatal("ListResource() succeeded with zero limit")
 	}
-	if _, err := client.GetResource(context.Background(), "https://netbox.example", "token", false, "dcim.devices", 0); err == nil {
+	if _, err := client.GetResource(context.Background(), "https://netbox.example", "token", "", "dcim.devices", 0); err == nil {
 		t.Fatal("GetResource() succeeded with zero ID")
 	}
 }
@@ -152,7 +152,7 @@ func TestCreateResourcePostsJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	record, err := NewClient().CreateResource(context.Background(), server.URL, "nbt_key.secret", false, "dcim.devices", json.RawMessage(`{"name":"leaf-01"}`))
+	record, err := NewClient().CreateResource(context.Background(), server.URL, "nbt_key.secret", "", "dcim.devices", json.RawMessage(`{"name":"leaf-01"}`))
 	if err != nil || string(record) != `{"id":1,"name":"leaf-01"}` {
 		t.Fatalf("CreateResource() = %s, %v", record, err)
 	}
@@ -187,7 +187,7 @@ func TestUpdateResourceUsesETag(t *testing.T) {
 	}))
 	defer server.Close()
 
-	record, err := NewClient().UpdateResource(context.Background(), server.URL, "token", false, "dcim.devices", 42, json.RawMessage(`{"name":"new"}`))
+	record, err := NewClient().UpdateResource(context.Background(), server.URL, "token", "", "dcim.devices", 42, json.RawMessage(`{"name":"new"}`))
 	if err != nil || !patchCalled || string(record) != `{"id":42,"name":"new"}` {
 		t.Fatalf("UpdateResource() = %s, %v; patch=%v", record, err, patchCalled)
 	}
@@ -211,7 +211,7 @@ func TestUpdateResourceRejectsMissingETagAndConflict(t *testing.T) {
 			}
 		}))
 		defer server.Close()
-		_, err := NewClient().UpdateResource(context.Background(), server.URL, "token", false, "dcim.devices", 42, json.RawMessage(`{"name":"new"}`))
+		_, err := NewClient().UpdateResource(context.Background(), server.URL, "token", "", "dcim.devices", 42, json.RawMessage(`{"name":"new"}`))
 		if err == nil || !strings.Contains(err.Error(), "did not return an ETag") || patchCalled {
 			t.Fatalf("error=%v patch=%v", err, patchCalled)
 		}
@@ -235,7 +235,7 @@ func TestUpdateResourceRejectsMissingETagAndConflict(t *testing.T) {
 			}
 		}))
 		defer server.Close()
-		_, err := NewClient().UpdateResource(context.Background(), server.URL, "token", false, "dcim.devices", 42, json.RawMessage(`{"name":"new"}`))
+		_, err := NewClient().UpdateResource(context.Background(), server.URL, "token", "", "dcim.devices", 42, json.RawMessage(`{"name":"new"}`))
 		if err == nil || !strings.Contains(err.Error(), "HTTP 412") {
 			t.Fatalf("error=%v", err)
 		}
@@ -259,7 +259,7 @@ func TestDeleteResourceUsesDetailEndpoint(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	if err := NewClient().DeleteResource(context.Background(), server.URL, "token", false, "ipam.prefixes", 4); err != nil {
+	if err := NewClient().DeleteResource(context.Background(), server.URL, "token", "", "ipam.prefixes", 4); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -298,22 +298,22 @@ func TestTokenLifecycleUsesV2Authentication(t *testing.T) {
 
 	client := NewClient()
 	old := "nbt_oldkey.oldsecret"
-	metadata, err := client.FindToken(context.Background(), server.URL, old, false)
+	metadata, err := client.FindToken(context.Background(), server.URL, old, "")
 	if err != nil || metadata != (TokenMetadata{ID: 7, Version: 2}) {
 		t.Fatalf("FindToken() = %#v, %v", metadata, err)
 	}
-	created, err := client.CreateToken(context.Background(), server.URL, old, false)
+	created, err := client.CreateToken(context.Background(), server.URL, old, "")
 	if err != nil || created.ID != 8 || created.Version != 2 || created.Token != "nbt_newkey.newsecret" {
 		t.Fatalf("CreateToken() = %#v, %v", created, err)
 	}
-	if err := client.DeleteToken(context.Background(), server.URL, created.Token, false, metadata.ID); err != nil {
+	if err := client.DeleteToken(context.Background(), server.URL, created.Token, "", metadata.ID); err != nil {
 		t.Fatalf("DeleteToken() error = %v", err)
 	}
 }
 
 func TestFindTokenRejectsLegacyAndAmbiguousTokens(t *testing.T) {
 	client := NewClient()
-	if _, err := client.FindToken(context.Background(), "https://netbox.example", "legacy", false); err == nil {
+	if _, err := client.FindToken(context.Background(), "https://netbox.example", "legacy", ""); err == nil {
 		t.Fatal("FindToken() succeeded for legacy token")
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -321,7 +321,7 @@ func TestFindTokenRejectsLegacyAndAmbiguousTokens(t *testing.T) {
 		_, _ = w.Write([]byte(`{"results":[]}`))
 	}))
 	defer server.Close()
-	if _, err := client.FindToken(context.Background(), server.URL, "nbt_key.secret", false); err == nil || !strings.Contains(err.Error(), "could not identify") {
+	if _, err := client.FindToken(context.Background(), server.URL, "nbt_key.secret", ""); err == nil || !strings.Contains(err.Error(), "could not identify") {
 		t.Fatalf("FindToken() error = %v", err)
 	}
 }

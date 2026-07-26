@@ -12,7 +12,7 @@ func TestFileStoreRoundTripUsesPrivatePermissions(t *testing.T) {
 	want := Config{
 		CurrentProfile: "lab",
 		Profiles: map[string]Profile{
-			"lab": {BaseURL: "https://netbox.example", TokenVersion: 2, RemoteTokenID: 7, InsecureTLS: true},
+			"lab": {BaseURL: "https://netbox.example", TokenVersion: 2, RemoteTokenID: 7, CertificateThumbprint: "AABB"},
 		},
 	}
 	if err := store.Save(want); err != nil {
@@ -31,6 +31,15 @@ func TestFileStoreRoundTripUsesPrivatePermissions(t *testing.T) {
 	}
 	if got.CurrentProfile != want.CurrentProfile || got.Profiles["lab"] != want.Profiles["lab"] {
 		t.Fatalf("Load() = %#v, want %#v", got, want)
+	}
+}
+
+func TestProfileRequiresReauthenticationForLegacyInsecureTLS(t *testing.T) {
+	if !(Profile{InsecureTLS: true}).RequiresReauthentication() {
+		t.Fatal("legacy insecure profile did not require reauthentication")
+	}
+	if (Profile{InsecureTLS: true, CertificateThumbprint: "AABB"}).RequiresReauthentication() {
+		t.Fatal("pinned profile required reauthentication")
 	}
 }
 

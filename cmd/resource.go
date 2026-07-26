@@ -143,7 +143,7 @@ func getResource(ctx context.Context, out io.Writer, deps dependencies, args []s
 		if err != nil || id <= 0 {
 			return fmt.Errorf("invalid resource ID %q; use a positive integer", args[1])
 		}
-		record, err := deps.resources.GetResource(ctx, profile.BaseURL, token, profile.InsecureTLS, args[0], id)
+		record, err := deps.resources.GetResource(ctx, profile.BaseURL, token, profile.CertificateThumbprint, args[0], id)
 		if err != nil {
 			return fmt.Errorf("query NetBox resource: %w", err)
 		}
@@ -156,7 +156,7 @@ func getResource(ctx context.Context, out io.Writer, deps dependencies, args []s
 	if err != nil {
 		return err
 	}
-	records, err := deps.resources.ListResource(ctx, profile.BaseURL, token, profile.InsecureTLS, args[0], netbox.ResourceQuery{
+	records, err := deps.resources.ListResource(ctx, profile.BaseURL, token, profile.CertificateThumbprint, args[0], netbox.ResourceQuery{
 		Search: options.search, Filters: filters, Limit: options.limit,
 	})
 	if err != nil {
@@ -180,7 +180,7 @@ func createResource(ctx context.Context, out io.Writer, deps dependencies, resou
 	if err != nil {
 		return err
 	}
-	record, err := deps.resources.CreateResource(ctx, profile.BaseURL, token, profile.InsecureTLS, resource, payload)
+	record, err := deps.resources.CreateResource(ctx, profile.BaseURL, token, profile.CertificateThumbprint, resource, payload)
 	if err != nil {
 		return fmt.Errorf("create NetBox resource: %w", err)
 	}
@@ -206,7 +206,7 @@ func updateResource(ctx context.Context, out io.Writer, deps dependencies, resou
 	if err != nil {
 		return err
 	}
-	record, err := deps.resources.UpdateResource(ctx, profile.BaseURL, token, profile.InsecureTLS, resource, id, payload)
+	record, err := deps.resources.UpdateResource(ctx, profile.BaseURL, token, profile.CertificateThumbprint, resource, id, payload)
 	if err != nil {
 		return fmt.Errorf("update NetBox resource: %w", err)
 	}
@@ -230,7 +230,7 @@ func deleteResource(ctx context.Context, out io.Writer, deps dependencies, resou
 	if err != nil {
 		return err
 	}
-	if err := deps.resources.DeleteResource(ctx, profile.BaseURL, token, profile.InsecureTLS, resource, id); err != nil {
+	if err := deps.resources.DeleteResource(ctx, profile.BaseURL, token, profile.CertificateThumbprint, resource, id); err != nil {
 		return fmt.Errorf("delete NetBox resource: %w", err)
 	}
 	_, err = fmt.Fprintf(out, "Deleted %s %d.\n", resource, id)
@@ -267,7 +267,7 @@ func listResources(ctx context.Context, out io.Writer, deps dependencies, option
 	if err != nil {
 		return err
 	}
-	resources, err := deps.resources.ListResources(ctx, profile.BaseURL, token, profile.InsecureTLS)
+	resources, err := deps.resources.ListResources(ctx, profile.BaseURL, token, profile.CertificateThumbprint)
 	if err != nil {
 		return fmt.Errorf("discover NetBox resources: %w", err)
 	}
@@ -298,6 +298,9 @@ func resourceConnection(deps dependencies, selectedProfile string) (config.Profi
 	profile, ok := cfg.Profiles[profileName]
 	if !ok {
 		return config.Profile{}, "", fmt.Errorf("profile %q does not exist", profileName)
+	}
+	if profile.RequiresReauthentication() {
+		return config.Profile{}, "", fmt.Errorf("profile %q uses deprecated insecure TLS; authenticate again to pin its certificate", profileName)
 	}
 	token, err := deps.tokens.Get(profileName)
 	if err != nil {

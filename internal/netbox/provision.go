@@ -3,8 +3,10 @@ package netbox
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +26,8 @@ type ProvisionResult struct {
 }
 
 type Provisioner interface {
-	Provision(ctx context.Context, baseURL, username, password string, insecureTLS bool) (ProvisionResult, error)
+	InspectCertificate(ctx context.Context, baseURL string) (string, error)
+	Provision(ctx context.Context, baseURL, username, password, certificateThumbprint string) (ProvisionResult, error)
 }
 
 type Client struct{ timeout time.Duration }
@@ -47,7 +50,34 @@ func NormalizeBaseURL(raw string) (string, error) {
 	return strings.TrimRight(u.String(), "/"), nil
 }
 
-func (c *Client) Provision(ctx context.Context, baseURL, username, password string, insecureTLS bool) (ProvisionResult, error) {
+// InspectCertificate returns the SHA-256 thumbprint of the leaf certificate
+// presented by an HTTPS server. It performs no HTTP request and sends no
+// credentials, so login can show the value before trusting it.
+func (c *Client) InspectCertificate(ctx context.Context, baseURL string) (string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "https" || u.Host == "" {
+		return "", errors.New("certificate inspection requires an https NetBox URL")
+	}
+	dialer := &tls.Dialer{Config: &tls.Config{ // #nosec G402 -- the certificate is displayed for explicit user approval before use.
+		InsecureSkipVerify: true,
+		ServerName:         u.Hostname(),
+	}}
+	conn, err := dialer.DialContext(ctx, "tcp", u.Host)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	state := conn.(*tls.Conn).ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return "", errors.New("server did not present a certificate")
+	}
+	return thumbprint(state.PeerCertificates[0].Raw), nil
+}
+
+func (c *Client) Provision(ctx context.Context, baseURL, username, password, certificateThumbprint string) (ProvisionResult, error) {
 	body, err := json.Marshal(map[string]string{"username": username, "password": password})
 	if err != nil {
 		return ProvisionResult{}, err
@@ -61,8 +91,8 @@ func (c *Client) Provision(ctx context.Context, baseURL, username, password stri
 	req.Header.Set("Content-Type", "application/json")
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if insecureTLS {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- explicitly confirmed by the user.
+	if transport.TLSClientConfig, err = tlsConfig(certificateThumbprint); err != nil {
+		return ProvisionResult{}, err
 	}
 	client := &http.Client{Transport: transport, Timeout: c.timeout}
 	response, err := client.Do(req)
@@ -87,6 +117,44 @@ func (c *Client) Provision(ctx context.Context, baseURL, username, password stri
 		return ProvisionResult{}, fmt.Errorf("decode NetBox response: %w", err)
 	}
 	return provisionResult(payload.ID, payload.Version, payload.Key, payload.Token)
+}
+
+func tlsConfig(certificateThumbprint string) (*tls.Config, error) {
+	if certificateThumbprint == "" {
+		return nil, nil
+	}
+	pinned, err := decodeThumbprint(certificateThumbprint)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{ // #nosec G402 -- VerifyConnection requires an exact saved certificate match.
+		InsecureSkipVerify: true,
+		VerifyConnection: func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
+				return errors.New("server did not present a certificate")
+			}
+			presented := sha256.Sum256(state.PeerCertificates[0].Raw)
+			if presented != pinned {
+				return errors.New("server certificate thumbprint does not match the pinned certificate")
+			}
+			return nil
+		},
+	}, nil
+}
+
+func thumbprint(rawCertificate []byte) string {
+	digest := sha256.Sum256(rawCertificate)
+	return strings.ToUpper(hex.EncodeToString(digest[:]))
+}
+
+func decodeThumbprint(value string) ([sha256.Size]byte, error) {
+	var digest [sha256.Size]byte
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != len(digest) {
+		return digest, errors.New("certificate thumbprint must be a SHA-256 hexadecimal digest")
+	}
+	copy(digest[:], decoded)
+	return digest, nil
 }
 
 func provisionResult(id, version int, key, token string) (ProvisionResult, error) {

@@ -20,14 +20,14 @@ type TokenMetadata struct {
 
 // TokenManager creates, identifies, and deletes the API token currently used by a profile.
 type TokenManager interface {
-	FindToken(context.Context, string, string, bool) (TokenMetadata, error)
-	CreateToken(context.Context, string, string, bool) (ProvisionResult, error)
-	DeleteToken(context.Context, string, string, bool, int) error
+	FindToken(context.Context, string, string, string) (TokenMetadata, error)
+	CreateToken(context.Context, string, string, string) (ProvisionResult, error)
+	DeleteToken(context.Context, string, string, string, int) error
 }
 
 // FindToken locates a v2 token using its public key. Older token formats cannot
 // be identified safely from their stored plaintext.
-func (c *Client) FindToken(ctx context.Context, baseURL, token string, insecureTLS bool) (TokenMetadata, error) {
+func (c *Client) FindToken(ctx context.Context, baseURL, token, certificateThumbprint string) (TokenMetadata, error) {
 	key, err := tokenKey(token)
 	if err != nil {
 		return TokenMetadata{}, err
@@ -40,7 +40,7 @@ func (c *Client) FindToken(ctx context.Context, baseURL, token string, insecureT
 	query.Set("key", key)
 	query.Set("limit", "2")
 	endpoint.RawQuery = query.Encode()
-	body, _, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodGet, endpoint.String(), nil, "")
+	body, _, err := c.request(ctx, baseURL, token, certificateThumbprint, http.MethodGet, endpoint.String(), nil, "")
 	if err != nil {
 		return TokenMetadata{}, err
 	}
@@ -63,8 +63,8 @@ func (c *Client) FindToken(ctx context.Context, baseURL, token string, insecureT
 }
 
 // CreateToken creates a token using an existing authenticated token.
-func (c *Client) CreateToken(ctx context.Context, baseURL, token string, insecureTLS bool) (ProvisionResult, error) {
-	body, _, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodPost, strings.TrimRight(baseURL, "/")+tokensPath, []byte(`{}`), "")
+func (c *Client) CreateToken(ctx context.Context, baseURL, token, certificateThumbprint string) (ProvisionResult, error) {
+	body, _, err := c.request(ctx, baseURL, token, certificateThumbprint, http.MethodPost, strings.TrimRight(baseURL, "/")+tokensPath, []byte(`{}`), "")
 	if err != nil {
 		return ProvisionResult{}, err
 	}
@@ -81,12 +81,12 @@ func (c *Client) CreateToken(ctx context.Context, baseURL, token string, insecur
 }
 
 // DeleteToken permanently revokes a token by its NetBox ID.
-func (c *Client) DeleteToken(ctx context.Context, baseURL, token string, insecureTLS bool, id int) error {
+func (c *Client) DeleteToken(ctx context.Context, baseURL, token, certificateThumbprint string, id int) error {
 	if id <= 0 {
 		return errors.New("NetBox token ID must be positive")
 	}
 	endpoint := fmt.Sprintf("%s%s%d/", strings.TrimRight(baseURL, "/"), tokensPath, id)
-	_, _, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodDelete, endpoint, nil, "")
+	_, _, err := c.request(ctx, baseURL, token, certificateThumbprint, http.MethodDelete, endpoint, nil, "")
 	return err
 }
 

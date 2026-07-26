@@ -3,7 +3,6 @@ package netbox
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,18 +36,18 @@ type ResourceQuery struct {
 
 // ResourceReader discovers and retrieves NetBox model records.
 type ResourceReader interface {
-	ListResources(context.Context, string, string, bool) ([]Resource, error)
-	ListResource(context.Context, string, string, bool, string, ResourceQuery) ([]json.RawMessage, error)
-	GetResource(context.Context, string, string, bool, string, int) (json.RawMessage, error)
-	CreateResource(context.Context, string, string, bool, string, json.RawMessage) (json.RawMessage, error)
-	UpdateResource(context.Context, string, string, bool, string, int, json.RawMessage) (json.RawMessage, error)
-	DeleteResource(context.Context, string, string, bool, string, int) error
+	ListResources(context.Context, string, string, string) ([]Resource, error)
+	ListResource(context.Context, string, string, string, string, ResourceQuery) ([]json.RawMessage, error)
+	GetResource(context.Context, string, string, string, string, int) (json.RawMessage, error)
+	CreateResource(context.Context, string, string, string, string, json.RawMessage) (json.RawMessage, error)
+	UpdateResource(context.Context, string, string, string, string, int, json.RawMessage) (json.RawMessage, error)
+	DeleteResource(context.Context, string, string, string, string, int) error
 }
 
 // ListResources discovers first-party model collection endpoints. Plugin endpoints
 // are intentionally excluded because they are not part of the built-in data model.
-func (c *Client) ListResources(ctx context.Context, baseURL, token string, insecureTLS bool) ([]Resource, error) {
-	root, err := c.getMap(ctx, baseURL, token, insecureTLS, apiPath)
+func (c *Client) ListResources(ctx context.Context, baseURL, token, certificateThumbprint string) ([]Resource, error) {
+	root, err := c.getMap(ctx, baseURL, token, certificateThumbprint, apiPath)
 	if err != nil {
 		return nil, fmt.Errorf("discover NetBox API root: %w", err)
 	}
@@ -62,7 +61,7 @@ func (c *Client) ListResources(ctx context.Context, baseURL, token string, insec
 
 	resources := make([]Resource, 0)
 	for _, app := range apps {
-		models, err := c.getMap(ctx, baseURL, token, insecureTLS, apiPath+app+"/")
+		models, err := c.getMap(ctx, baseURL, token, certificateThumbprint, apiPath+app+"/")
 		if err != nil {
 			return nil, fmt.Errorf("discover NetBox application %q: %w", app, err)
 		}
@@ -77,11 +76,11 @@ func (c *Client) ListResources(ctx context.Context, baseURL, token string, insec
 }
 
 // ListResource returns at most query.Limit raw records for a discovered resource.
-func (c *Client) ListResource(ctx context.Context, baseURL, token string, insecureTLS bool, resource string, query ResourceQuery) ([]json.RawMessage, error) {
+func (c *Client) ListResource(ctx context.Context, baseURL, token, certificateThumbprint, resource string, query ResourceQuery) ([]json.RawMessage, error) {
 	if query.Limit <= 0 {
 		return nil, errors.New("resource query limit must be positive")
 	}
-	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, insecureTLS, resource)
+	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, certificateThumbprint, resource)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +104,7 @@ func (c *Client) ListResource(ctx context.Context, baseURL, token string, insecu
 		params.Set("limit", strconv.Itoa(query.Limit-len(records)))
 		params.Set("offset", strconv.Itoa(offset))
 		parsedURL.RawQuery = params.Encode()
-		body, err := c.get(ctx, baseURL, token, insecureTLS, parsedURL.String())
+		body, err := c.get(ctx, baseURL, token, certificateThumbprint, parsedURL.String())
 		if err != nil {
 			return nil, err
 		}
@@ -130,15 +129,15 @@ func (c *Client) ListResource(ctx context.Context, baseURL, token string, insecu
 }
 
 // GetResource retrieves one record by its positive numeric ID.
-func (c *Client) GetResource(ctx context.Context, baseURL, token string, insecureTLS bool, resource string, id int) (json.RawMessage, error) {
+func (c *Client) GetResource(ctx context.Context, baseURL, token, certificateThumbprint, resource string, id int) (json.RawMessage, error) {
 	if id <= 0 {
 		return nil, errors.New("resource ID must be positive")
 	}
-	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, insecureTLS, resource)
+	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, certificateThumbprint, resource)
 	if err != nil {
 		return nil, err
 	}
-	body, err := c.get(ctx, baseURL, token, insecureTLS, endpoint+strconv.Itoa(id)+"/")
+	body, err := c.get(ctx, baseURL, token, certificateThumbprint, endpoint+strconv.Itoa(id)+"/")
 	if err != nil {
 		return nil, err
 	}
@@ -149,15 +148,15 @@ func (c *Client) GetResource(ctx context.Context, baseURL, token string, insecur
 }
 
 // CreateResource creates one record using a JSON object payload.
-func (c *Client) CreateResource(ctx context.Context, baseURL, token string, insecureTLS bool, resource string, payload json.RawMessage) (json.RawMessage, error) {
+func (c *Client) CreateResource(ctx context.Context, baseURL, token, certificateThumbprint, resource string, payload json.RawMessage) (json.RawMessage, error) {
 	if err := validateResourcePayload(payload); err != nil {
 		return nil, err
 	}
-	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, insecureTLS, resource)
+	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, certificateThumbprint, resource)
 	if err != nil {
 		return nil, err
 	}
-	body, _, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodPost, endpoint, payload, "")
+	body, _, err := c.request(ctx, baseURL, token, certificateThumbprint, http.MethodPost, endpoint, payload, "")
 	if err != nil {
 		return nil, err
 	}
@@ -168,19 +167,19 @@ func (c *Client) CreateResource(ctx context.Context, baseURL, token string, inse
 }
 
 // UpdateResource applies a partial update guarded by the record's current ETag.
-func (c *Client) UpdateResource(ctx context.Context, baseURL, token string, insecureTLS bool, resource string, id int, payload json.RawMessage) (json.RawMessage, error) {
+func (c *Client) UpdateResource(ctx context.Context, baseURL, token, certificateThumbprint, resource string, id int, payload json.RawMessage) (json.RawMessage, error) {
 	if id <= 0 {
 		return nil, errors.New("resource ID must be positive")
 	}
 	if err := validateResourcePayload(payload); err != nil {
 		return nil, err
 	}
-	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, insecureTLS, resource)
+	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, certificateThumbprint, resource)
 	if err != nil {
 		return nil, err
 	}
 	detailEndpoint := endpoint + strconv.Itoa(id) + "/"
-	_, headers, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodGet, detailEndpoint, nil, "")
+	_, headers, err := c.request(ctx, baseURL, token, certificateThumbprint, http.MethodGet, detailEndpoint, nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +187,7 @@ func (c *Client) UpdateResource(ctx context.Context, baseURL, token string, inse
 	if etag == "" {
 		return nil, errors.New("NetBox did not return an ETag; refusing an unguarded update")
 	}
-	body, _, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodPatch, detailEndpoint, payload, etag)
+	body, _, err := c.request(ctx, baseURL, token, certificateThumbprint, http.MethodPatch, detailEndpoint, payload, etag)
 	if err != nil {
 		return nil, err
 	}
@@ -199,24 +198,24 @@ func (c *Client) UpdateResource(ctx context.Context, baseURL, token string, inse
 }
 
 // DeleteResource deletes one record by positive numeric ID.
-func (c *Client) DeleteResource(ctx context.Context, baseURL, token string, insecureTLS bool, resource string, id int) error {
+func (c *Client) DeleteResource(ctx context.Context, baseURL, token, certificateThumbprint, resource string, id int) error {
 	if id <= 0 {
 		return errors.New("resource ID must be positive")
 	}
-	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, insecureTLS, resource)
+	endpoint, err := c.resourceEndpoint(ctx, baseURL, token, certificateThumbprint, resource)
 	if err != nil {
 		return err
 	}
-	_, _, err = c.request(ctx, baseURL, token, insecureTLS, http.MethodDelete, endpoint+strconv.Itoa(id)+"/", nil, "")
+	_, _, err = c.request(ctx, baseURL, token, certificateThumbprint, http.MethodDelete, endpoint+strconv.Itoa(id)+"/", nil, "")
 	return err
 }
 
-func (c *Client) resourceEndpoint(ctx context.Context, baseURL, token string, insecureTLS bool, resource string) (string, error) {
+func (c *Client) resourceEndpoint(ctx context.Context, baseURL, token, certificateThumbprint, resource string) (string, error) {
 	app, model, ok := strings.Cut(resource, ".")
 	if !ok || !validSegment(app) || !validSegment(model) || strings.Contains(model, ".") {
 		return "", fmt.Errorf("invalid resource %q; use application.resource", resource)
 	}
-	resources, err := c.ListResources(ctx, baseURL, token, insecureTLS)
+	resources, err := c.ListResources(ctx, baseURL, token, certificateThumbprint)
 	if err != nil {
 		return "", err
 	}
@@ -228,8 +227,8 @@ func (c *Client) resourceEndpoint(ctx context.Context, baseURL, token string, in
 	return "", fmt.Errorf("resource %q is not available on this NetBox instance", resource)
 }
 
-func (c *Client) getMap(ctx context.Context, baseURL, token string, insecureTLS bool, path string) (map[string]string, error) {
-	body, err := c.get(ctx, baseURL, token, insecureTLS, strings.TrimRight(baseURL, "/")+path)
+func (c *Client) getMap(ctx context.Context, baseURL, token, certificateThumbprint, path string) (map[string]string, error) {
+	body, err := c.get(ctx, baseURL, token, certificateThumbprint, strings.TrimRight(baseURL, "/")+path)
 	if err != nil {
 		return nil, err
 	}
@@ -240,12 +239,12 @@ func (c *Client) getMap(ctx context.Context, baseURL, token string, insecureTLS 
 	return values, nil
 }
 
-func (c *Client) get(ctx context.Context, baseURL, token string, insecureTLS bool, endpoint string) ([]byte, error) {
-	body, _, err := c.request(ctx, baseURL, token, insecureTLS, http.MethodGet, endpoint, nil, "")
+func (c *Client) get(ctx context.Context, baseURL, token, certificateThumbprint, endpoint string) ([]byte, error) {
+	body, _, err := c.request(ctx, baseURL, token, certificateThumbprint, http.MethodGet, endpoint, nil, "")
 	return body, err
 }
 
-func (c *Client) request(ctx context.Context, baseURL, token string, insecureTLS bool, method, endpoint string, payload []byte, ifMatch string) ([]byte, http.Header, error) {
+func (c *Client) request(ctx context.Context, baseURL, token, certificateThumbprint, method, endpoint string, payload []byte, ifMatch string) ([]byte, http.Header, error) {
 	var bodyReader io.Reader
 	if payload != nil {
 		bodyReader = bytes.NewReader(payload)
@@ -267,8 +266,8 @@ func (c *Client) request(ctx context.Context, baseURL, token string, insecureTLS
 		req.Header.Set("Authorization", "Token "+token)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if insecureTLS {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- stored only after explicit user confirmation.
+	if transport.TLSClientConfig, err = tlsConfig(certificateThumbprint); err != nil {
+		return nil, nil, err
 	}
 	client := &http.Client{Transport: transport, Timeout: c.timeout}
 	response, err := client.Do(req)

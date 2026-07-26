@@ -79,18 +79,23 @@ func login(ctx context.Context, out interface{ Write([]byte) (int, error) }, dep
 		return errors.New("password cannot be empty")
 	}
 
-	result, err := deps.api.Provision(ctx, baseURL, username, password, false)
-	insecure := false
+	result, err := deps.api.Provision(ctx, baseURL, username, password, "")
+	certificateThumbprint := ""
 	if err != nil && netbox.IsTLSVerificationError(err) {
-		confirmed, promptErr := deps.prompt.Confirm("Certificate verification failed. Retry without verifying the server certificate for this profile", false)
+		verificationErr := err
+		var inspectErr error
+		certificateThumbprint, inspectErr = deps.api.InspectCertificate(ctx, baseURL)
+		if inspectErr != nil {
+			return fmt.Errorf("inspect server certificate: %w", inspectErr)
+		}
+		confirmed, promptErr := deps.prompt.Confirm(fmt.Sprintf("Certificate verification failed. Trust and pin this server certificate for profile %q? SHA-256 thumbprint: %s", profileName, certificateThumbprint), false)
 		if promptErr != nil {
 			return promptErr
 		}
 		if !confirmed {
-			return fmt.Errorf("certificate verification failed; login cancelled: %w", err)
+			return fmt.Errorf("certificate verification failed; login cancelled: %w", verificationErr)
 		}
-		result, err = deps.api.Provision(ctx, baseURL, username, password, true)
-		insecure = true
+		result, err = deps.api.Provision(ctx, baseURL, username, password, certificateThumbprint)
 	}
 	if err != nil {
 		return fmt.Errorf("provision NetBox token: %w", err)
@@ -106,10 +111,10 @@ func login(ctx context.Context, out interface{ Write([]byte) (int, error) }, dep
 	}
 
 	cfg.Profiles[profileName] = config.Profile{
-		BaseURL:       baseURL,
-		TokenVersion:  result.Version,
-		RemoteTokenID: result.ID,
-		InsecureTLS:   insecure,
+		BaseURL:               baseURL,
+		TokenVersion:          result.Version,
+		RemoteTokenID:         result.ID,
+		CertificateThumbprint: certificateThumbprint,
 	}
 	cfg.CurrentProfile = profileName
 	if err := deps.configs.Save(cfg); err != nil {
@@ -204,7 +209,7 @@ func rotateToken(ctx context.Context, out io.Writer, deps dependencies, selected
 		}
 	}
 
-	created, err := deps.tokenAPI.CreateToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS)
+	created, err := deps.tokenAPI.CreateToken(ctx, profile.BaseURL, oldToken, profile.CertificateThumbprint)
 	if err != nil {
 		return fmt.Errorf("create replacement NetBox token: %w", err)
 	}
@@ -212,7 +217,7 @@ func rotateToken(ctx context.Context, out io.Writer, deps dependencies, selected
 		if created.ID <= 0 {
 			return errors.New("NetBox did not create a v2 token and omitted its ID; revoke the replacement token manually")
 		}
-		cleanupErr := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS, created.ID)
+		cleanupErr := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.CertificateThumbprint, created.ID)
 		if cleanupErr != nil {
 			return fmt.Errorf("NetBox did not create a v2 token and cleanup failed: %w", cleanupErr)
 		}
@@ -222,7 +227,7 @@ func rotateToken(ctx context.Context, out io.Writer, deps dependencies, selected
 		return errors.New("NetBox created a replacement token without an ID; refusing to replace the saved token")
 	}
 	if err := deps.tokens.Set(name, created.Token); err != nil {
-		cleanupErr := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS, created.ID)
+		cleanupErr := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.CertificateThumbprint, created.ID)
 		if cleanupErr != nil {
 			return fmt.Errorf("store replacement token in OS keychain: %w (remote cleanup also failed: %v)", err, cleanupErr)
 		}
@@ -232,7 +237,7 @@ func rotateToken(ctx context.Context, out io.Writer, deps dependencies, selected
 	cfg, err := deps.configs.Load()
 	if err != nil {
 		_ = deps.tokens.Set(name, oldToken)
-		_ = deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS, created.ID)
+		_ = deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.CertificateThumbprint, created.ID)
 		return fmt.Errorf("load profiles after creating replacement token: %w", err)
 	}
 	updated := cfg.Profiles[name]
@@ -241,13 +246,13 @@ func rotateToken(ctx context.Context, out io.Writer, deps dependencies, selected
 	cfg.Profiles[name] = updated
 	if err := deps.configs.Save(cfg); err != nil {
 		_ = deps.tokens.Set(name, oldToken)
-		cleanupErr := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.InsecureTLS, created.ID)
+		cleanupErr := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, oldToken, profile.CertificateThumbprint, created.ID)
 		if cleanupErr != nil {
 			return fmt.Errorf("save replacement profile: %w (remote cleanup also failed: %v)", err, cleanupErr)
 		}
 		return fmt.Errorf("save replacement profile: %w", err)
 	}
-	if err := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, created.Token, profile.InsecureTLS, oldID); err != nil {
+	if err := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, created.Token, profile.CertificateThumbprint, oldID); err != nil {
 		return fmt.Errorf("replacement token is saved, but revoking the previous NetBox token failed: %w", err)
 	}
 	_, err = fmt.Fprintf(out, "Rotated token for profile %q.\n", name)
@@ -264,7 +269,7 @@ func revokeToken(ctx context.Context, out io.Writer, deps dependencies, selected
 			return err
 		}
 	}
-	if err := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, token, profile.InsecureTLS, tokenID); err != nil {
+	if err := deps.tokenAPI.DeleteToken(ctx, profile.BaseURL, token, profile.CertificateThumbprint, tokenID); err != nil {
 		return fmt.Errorf("revoke NetBox token: %w", err)
 	}
 	if err := removeProfile(out, deps, name, true); err != nil {
@@ -292,6 +297,9 @@ func lifecycleConnection(ctx context.Context, deps dependencies, selectedProfile
 	if !ok {
 		return "", config.Profile{}, "", 0, fmt.Errorf("profile %q does not exist", name)
 	}
+	if profile.RequiresReauthentication() {
+		return "", config.Profile{}, "", 0, fmt.Errorf("profile %q uses deprecated insecure TLS; authenticate again to pin its certificate", name)
+	}
 	token, err := deps.tokens.Get(name)
 	if err != nil {
 		return "", config.Profile{}, "", 0, fmt.Errorf("retrieve token from OS keychain: %w", err)
@@ -302,7 +310,7 @@ func lifecycleConnection(ctx context.Context, deps dependencies, selectedProfile
 	if profile.RemoteTokenID > 0 {
 		return name, profile, token, profile.RemoteTokenID, nil
 	}
-	metadata, err := deps.tokenAPI.FindToken(ctx, profile.BaseURL, token, profile.InsecureTLS)
+	metadata, err := deps.tokenAPI.FindToken(ctx, profile.BaseURL, token, profile.CertificateThumbprint)
 	if err != nil {
 		return "", config.Profile{}, "", 0, fmt.Errorf("identify saved NetBox token: %w", err)
 	}
@@ -313,11 +321,11 @@ func lifecycleConnection(ctx context.Context, deps dependencies, selectedProfile
 }
 
 type profileView struct {
-	Name         string `json:"name"`
-	BaseURL      string `json:"base_url"`
-	TokenVersion int    `json:"token_version"`
-	InsecureTLS  bool   `json:"insecure_tls"`
-	Current      bool   `json:"current"`
+	Name                  string `json:"name"`
+	BaseURL               string `json:"base_url"`
+	TokenVersion          int    `json:"token_version"`
+	CertificateThumbprint string `json:"certificate_thumbprint,omitempty"`
+	Current               bool   `json:"current"`
 }
 
 func newProfileCmd(deps dependencies) *cobra.Command {
@@ -382,11 +390,11 @@ func listProfiles(out io.Writer, deps dependencies, output string) error {
 		return writeJSON(out, profiles)
 	}
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(table, "NAME\tBASE URL\tTOKEN VERSION\tINSECURE TLS\tCURRENT"); err != nil {
+	if _, err := fmt.Fprintln(table, "NAME\tBASE URL\tTOKEN VERSION\tCERTIFICATE THUMBPRINT\tCURRENT"); err != nil {
 		return err
 	}
 	for _, value := range profiles {
-		if _, err := fmt.Fprintf(table, "%s\t%s\t%d\t%t\t%t\n", value.Name, value.BaseURL, value.TokenVersion, value.InsecureTLS, value.Current); err != nil {
+		if _, err := fmt.Fprintf(table, "%s\t%s\t%d\t%s\t%t\n", value.Name, value.BaseURL, value.TokenVersion, value.CertificateThumbprint, value.Current); err != nil {
 			return err
 		}
 	}
@@ -408,15 +416,15 @@ func showProfile(out io.Writer, deps dependencies, name, output string) error {
 	if !ok {
 		return fmt.Errorf("profile %q does not exist", name)
 	}
-	view := profileView{Name: name, BaseURL: value.BaseURL, TokenVersion: value.TokenVersion, InsecureTLS: value.InsecureTLS, Current: cfg.CurrentProfile == name}
+	view := profileView{Name: name, BaseURL: value.BaseURL, TokenVersion: value.TokenVersion, CertificateThumbprint: value.CertificateThumbprint, Current: cfg.CurrentProfile == name}
 	if output == "json" {
 		return writeJSON(out, view)
 	}
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(table, "NAME\tBASE URL\tTOKEN VERSION\tINSECURE TLS\tCURRENT"); err != nil {
+	if _, err := fmt.Fprintln(table, "NAME\tBASE URL\tTOKEN VERSION\tCERTIFICATE THUMBPRINT\tCURRENT"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(table, "%s\t%s\t%d\t%t\t%t\n", view.Name, view.BaseURL, view.TokenVersion, view.InsecureTLS, view.Current); err != nil {
+	if _, err := fmt.Fprintf(table, "%s\t%s\t%d\t%s\t%t\n", view.Name, view.BaseURL, view.TokenVersion, view.CertificateThumbprint, view.Current); err != nil {
 		return err
 	}
 	return table.Flush()
@@ -481,7 +489,7 @@ func profileViews(cfg config.Config) []profileView {
 	profiles := make([]profileView, 0, len(cfg.Profiles))
 	for name, value := range cfg.Profiles {
 		profiles = append(profiles, profileView{
-			Name: name, BaseURL: value.BaseURL, TokenVersion: value.TokenVersion, InsecureTLS: value.InsecureTLS, Current: cfg.CurrentProfile == name,
+			Name: name, BaseURL: value.BaseURL, TokenVersion: value.TokenVersion, CertificateThumbprint: value.CertificateThumbprint, Current: cfg.CurrentProfile == name,
 		})
 	}
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].Name < profiles[j].Name })

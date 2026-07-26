@@ -56,9 +56,10 @@ func (s *memoryTokenStore) Delete(profile string) error {
 }
 
 type scriptedPrompt struct {
-	strings  []string
-	password string
-	confirms []bool
+	strings       []string
+	password      string
+	confirms      []bool
+	confirmLabels []string
 }
 
 func (p *scriptedPrompt) String(_, _ string) (string, error) {
@@ -67,16 +68,19 @@ func (p *scriptedPrompt) String(_, _ string) (string, error) {
 	return value, nil
 }
 func (p *scriptedPrompt) Password(string) (string, error) { return p.password, nil }
-func (p *scriptedPrompt) Confirm(string, bool) (bool, error) {
+func (p *scriptedPrompt) Confirm(label string, _ bool) (bool, error) {
+	p.confirmLabels = append(p.confirmLabels, label)
 	value := p.confirms[0]
 	p.confirms = p.confirms[1:]
 	return value, nil
 }
 
 type fakeProvisioner struct {
-	calls   []bool
-	results []netbox.ProvisionResult
-	errors  []error
+	calls      []string
+	thumbprint string
+	inspectErr error
+	results    []netbox.ProvisionResult
+	errors     []error
 }
 
 type deleteCall struct {
@@ -93,13 +97,13 @@ type fakeTokenManager struct {
 	deletes    []deleteCall
 }
 
-func (m *fakeTokenManager) FindToken(_ context.Context, _, _ string, _ bool) (netbox.TokenMetadata, error) {
+func (m *fakeTokenManager) FindToken(_ context.Context, _, _ string, _ string) (netbox.TokenMetadata, error) {
 	return m.findResult, m.findErr
 }
-func (m *fakeTokenManager) CreateToken(_ context.Context, _, _ string, _ bool) (netbox.ProvisionResult, error) {
+func (m *fakeTokenManager) CreateToken(_ context.Context, _, _ string, _ string) (netbox.ProvisionResult, error) {
 	return m.created, m.createErr
 }
-func (m *fakeTokenManager) DeleteToken(_ context.Context, _ string, token string, _ bool, id int) error {
+func (m *fakeTokenManager) DeleteToken(_ context.Context, _ string, token string, _ string, id int) error {
 	m.deletes = append(m.deletes, deleteCall{token: token, id: id})
 	index := len(m.deletes) - 1
 	if index < len(m.deleteErrs) {
@@ -108,8 +112,12 @@ func (m *fakeTokenManager) DeleteToken(_ context.Context, _ string, token string
 	return nil
 }
 
-func (p *fakeProvisioner) Provision(_ context.Context, _, _, _ string, insecure bool) (netbox.ProvisionResult, error) {
-	p.calls = append(p.calls, insecure)
+func (p *fakeProvisioner) InspectCertificate(_ context.Context, _ string) (string, error) {
+	return p.thumbprint, p.inspectErr
+}
+
+func (p *fakeProvisioner) Provision(_ context.Context, _, _, _, certificateThumbprint string) (netbox.ProvisionResult, error) {
+	p.calls = append(p.calls, certificateThumbprint)
 	index := len(p.calls) - 1
 	if p.errors[index] != nil {
 		return netbox.ProvisionResult{}, p.errors[index]
@@ -134,7 +142,7 @@ func TestLoginStoresTokenButDoesNotPrintIt(t *testing.T) {
 	if tokens.values["lab"] != "nbt_key.secret" {
 		t.Fatalf("stored token = %q", tokens.values["lab"])
 	}
-	if got := configs.cfg.Profiles["lab"]; got.BaseURL != "https://netbox.example" || got.TokenVersion != 2 || got.RemoteTokenID != 12 || got.InsecureTLS {
+	if got := configs.cfg.Profiles["lab"]; got.BaseURL != "https://netbox.example" || got.TokenVersion != 2 || got.RemoteTokenID != 12 || got.InsecureTLS || got.CertificateThumbprint != "" {
 		t.Fatalf("saved profile = %#v", got)
 	}
 	if strings.Contains(out.String(), "nbt_key.secret") || !strings.Contains(out.String(), "stored securely") {
@@ -142,27 +150,54 @@ func TestLoginStoresTokenButDoesNotPrintIt(t *testing.T) {
 	}
 }
 
-func TestLoginRetriesOnlyAfterConfirmedTLSBypass(t *testing.T) {
+func TestLoginPinsCertificateAfterConfirmedTLSFailure(t *testing.T) {
 	configs := &memoryConfigStore{cfg: config.Config{Profiles: map[string]config.Profile{}}}
 	tokens := &memoryTokenStore{}
 	api := &fakeProvisioner{
-		results: []netbox.ProvisionResult{{}, {Token: "legacy", Version: 1}},
-		errors:  []error{x509.UnknownAuthorityError{}, nil},
+		thumbprint: "AABB",
+		results:    []netbox.ProvisionResult{{}, {Token: "legacy", Version: 1}},
+		errors:     []error{x509.UnknownAuthorityError{}, nil},
 	}
+	prompt := &scriptedPrompt{strings: []string{"lab", "https://netbox.example", "alice"}, password: "password", confirms: []bool{true}}
 	deps := dependencies{
 		configs: configs,
 		tokens:  tokens,
 		api:     api,
-		prompt:  &scriptedPrompt{strings: []string{"lab", "https://netbox.example", "alice"}, password: "password", confirms: []bool{true}},
+		prompt:  prompt,
 	}
 	if err := login(context.Background(), &bytes.Buffer{}, deps); err != nil {
 		t.Fatalf("login() error = %v", err)
 	}
-	if got := api.calls; len(got) != 2 || got[0] || !got[1] {
-		t.Fatalf("TLS attempts = %#v", got)
+	if got := api.calls; len(got) != 2 || got[0] != "" || got[1] != "AABB" {
+		t.Fatalf("certificate attempts = %#v", got)
 	}
-	if !configs.cfg.Profiles["lab"].InsecureTLS {
-		t.Fatal("InsecureTLS was not saved")
+	if got := configs.cfg.Profiles["lab"].CertificateThumbprint; got != "AABB" {
+		t.Fatalf("certificate thumbprint = %q", got)
+	}
+	if len(prompt.confirmLabels) != 1 || !strings.Contains(prompt.confirmLabels[0], "AABB") {
+		t.Fatalf("confirmation prompts = %#v", prompt.confirmLabels)
+	}
+}
+
+func TestLoginDoesNotProvisionOrSaveWhenCertificateTrustIsDeclined(t *testing.T) {
+	configs := &memoryConfigStore{cfg: config.Config{Profiles: map[string]config.Profile{}}}
+	api := &fakeProvisioner{
+		thumbprint: "AABB",
+		results:    []netbox.ProvisionResult{{}},
+		errors:     []error{x509.UnknownAuthorityError{}},
+	}
+	deps := dependencies{
+		configs: configs,
+		tokens:  &memoryTokenStore{},
+		api:     api,
+		prompt:  &scriptedPrompt{strings: []string{"lab", "https://netbox.example", "alice"}, password: "password", confirms: []bool{false}},
+	}
+	err := login(context.Background(), &bytes.Buffer{}, deps)
+	if err == nil || !strings.Contains(err.Error(), "login cancelled") {
+		t.Fatalf("login() error = %v", err)
+	}
+	if len(api.calls) != 1 || configs.saved {
+		t.Fatalf("calls=%#v saved=%t", api.calls, configs.saved)
 	}
 }
 
@@ -251,7 +286,7 @@ func TestProfileCommandsManageNonSecretMetadata(t *testing.T) {
 		CurrentProfile: "lab",
 		Profiles: map[string]config.Profile{
 			"lab":  {BaseURL: "https://lab.example", TokenVersion: 2},
-			"prod": {BaseURL: "https://prod.example", TokenVersion: 1, InsecureTLS: true},
+			"prod": {BaseURL: "https://prod.example", TokenVersion: 1, CertificateThumbprint: "AABB"},
 		},
 	}}
 	tokens := &memoryTokenStore{values: map[string]string{"lab": "lab-secret", "prod": "prod-secret"}}
@@ -262,7 +297,7 @@ func TestProfileCommandsManageNonSecretMetadata(t *testing.T) {
 		if err := listProfiles(&out, deps, "json"); err != nil {
 			t.Fatal(err)
 		}
-		if got := out.String(); !strings.Contains(got, `"name":"lab"`) || strings.Contains(got, "secret") || strings.Index(got, `"name":"lab"`) > strings.Index(got, `"name":"prod"`) {
+		if got := out.String(); !strings.Contains(got, `"name":"lab"`) || !strings.Contains(got, `"certificate_thumbprint":"AABB"`) || strings.Contains(got, "secret") || strings.Index(got, `"name":"lab"`) > strings.Index(got, `"name":"prod"`) {
 			t.Fatalf("output = %q", got)
 		}
 	})

@@ -15,10 +15,17 @@ var profileNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // Profile contains non-secret connection metadata. API tokens belong in the OS keychain.
 type Profile struct {
-	BaseURL       string `json:"base_url"`
-	TokenVersion  int    `json:"token_version"`
-	RemoteTokenID int    `json:"remote_token_id,omitempty"`
-	InsecureTLS   bool   `json:"insecure_tls,omitempty"`
+	BaseURL               string `json:"base_url"`
+	TokenVersion          int    `json:"token_version"`
+	RemoteTokenID         int    `json:"remote_token_id,omitempty"`
+	CertificateThumbprint string `json:"certificate_thumbprint,omitempty"`
+	InsecureTLS           bool   `json:"insecure_tls,omitempty"`
+}
+
+// RequiresReauthentication reports whether this profile uses the deprecated
+// unverified-TLS setting and must be recreated with a certificate pin.
+func (p Profile) RequiresReauthentication() bool {
+	return p.InsecureTLS && p.CertificateThumbprint == ""
 }
 
 type Config struct {

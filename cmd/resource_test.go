@@ -15,18 +15,18 @@ import (
 )
 
 type fakeResourceReader struct {
-	baseURL   string
-	token     string
-	insecure  bool
-	resource  string
-	query     netbox.ResourceQuery
-	resources []netbox.Resource
-	records   []json.RawMessage
-	record    json.RawMessage
-	payload   json.RawMessage
-	id        int
-	deleted   bool
-	err       error
+	baseURL    string
+	token      string
+	thumbprint string
+	resource   string
+	query      netbox.ResourceQuery
+	resources  []netbox.Resource
+	records    []json.RawMessage
+	record     json.RawMessage
+	payload    json.RawMessage
+	id         int
+	deleted    bool
+	err        error
 }
 
 type nonInteractivePrompt struct{}
@@ -42,33 +42,33 @@ func (nonInteractivePrompt) Confirm(string, bool) (bool, error) {
 }
 func (nonInteractivePrompt) Interactive() bool { return false }
 
-func (r *fakeResourceReader) ListResources(_ context.Context, baseURL, token string, insecure bool) ([]netbox.Resource, error) {
-	r.baseURL, r.token, r.insecure = baseURL, token, insecure
+func (r *fakeResourceReader) ListResources(_ context.Context, baseURL, token, thumbprint string) ([]netbox.Resource, error) {
+	r.baseURL, r.token, r.thumbprint = baseURL, token, thumbprint
 	return r.resources, r.err
 }
-func (r *fakeResourceReader) ListResource(_ context.Context, baseURL, token string, insecure bool, resource string, query netbox.ResourceQuery) ([]json.RawMessage, error) {
-	r.baseURL, r.token, r.insecure, r.resource, r.query = baseURL, token, insecure, resource, query
+func (r *fakeResourceReader) ListResource(_ context.Context, baseURL, token, thumbprint, resource string, query netbox.ResourceQuery) ([]json.RawMessage, error) {
+	r.baseURL, r.token, r.thumbprint, r.resource, r.query = baseURL, token, thumbprint, resource, query
 	return r.records, r.err
 }
-func (r *fakeResourceReader) GetResource(_ context.Context, baseURL, token string, insecure bool, resource string, _ int) (json.RawMessage, error) {
-	r.baseURL, r.token, r.insecure, r.resource = baseURL, token, insecure, resource
+func (r *fakeResourceReader) GetResource(_ context.Context, baseURL, token, thumbprint, resource string, _ int) (json.RawMessage, error) {
+	r.baseURL, r.token, r.thumbprint, r.resource = baseURL, token, thumbprint, resource
 	return r.record, r.err
 }
-func (r *fakeResourceReader) CreateResource(_ context.Context, baseURL, token string, insecure bool, resource string, payload json.RawMessage) (json.RawMessage, error) {
-	r.baseURL, r.token, r.insecure, r.resource, r.payload = baseURL, token, insecure, resource, payload
+func (r *fakeResourceReader) CreateResource(_ context.Context, baseURL, token, thumbprint, resource string, payload json.RawMessage) (json.RawMessage, error) {
+	r.baseURL, r.token, r.thumbprint, r.resource, r.payload = baseURL, token, thumbprint, resource, payload
 	return r.record, r.err
 }
-func (r *fakeResourceReader) UpdateResource(_ context.Context, baseURL, token string, insecure bool, resource string, id int, payload json.RawMessage) (json.RawMessage, error) {
-	r.baseURL, r.token, r.insecure, r.resource, r.id, r.payload = baseURL, token, insecure, resource, id, payload
+func (r *fakeResourceReader) UpdateResource(_ context.Context, baseURL, token, thumbprint, resource string, id int, payload json.RawMessage) (json.RawMessage, error) {
+	r.baseURL, r.token, r.thumbprint, r.resource, r.id, r.payload = baseURL, token, thumbprint, resource, id, payload
 	return r.record, r.err
 }
-func (r *fakeResourceReader) DeleteResource(_ context.Context, baseURL, token string, insecure bool, resource string, id int) error {
-	r.baseURL, r.token, r.insecure, r.resource, r.id, r.deleted = baseURL, token, insecure, resource, id, true
+func (r *fakeResourceReader) DeleteResource(_ context.Context, baseURL, token, thumbprint, resource string, id int) error {
+	r.baseURL, r.token, r.thumbprint, r.resource, r.id, r.deleted = baseURL, token, thumbprint, resource, id, true
 	return r.err
 }
 
 func TestGetResourceUsesProfileAndRendersTable(t *testing.T) {
-	configs := &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{"lab": {BaseURL: "https://netbox.example", InsecureTLS: true}}}}
+	configs := &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{"lab": {BaseURL: "https://netbox.example", CertificateThumbprint: "AABB"}}}}
 	reader := &fakeResourceReader{records: []json.RawMessage{json.RawMessage(`{"id":1,"name":"leaf-01","status":{"label":"Active"}}`)}}
 	deps := dependencies{configs: configs, tokens: &memoryTokenStore{values: map[string]string{"lab": "secret"}}, resources: reader}
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
@@ -77,7 +77,7 @@ func TestGetResourceUsesProfileAndRendersTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getResource() error = %v", err)
 	}
-	if reader.baseURL != "https://netbox.example" || reader.token != "secret" || !reader.insecure || reader.resource != "dcim.devices" || reader.query.Limit != 5 {
+	if reader.baseURL != "https://netbox.example" || reader.token != "secret" || reader.thumbprint != "AABB" || reader.resource != "dcim.devices" || reader.query.Limit != 5 {
 		t.Fatalf("query = %#v", reader)
 	}
 	if !strings.Contains(out.String(), "ID") || !strings.Contains(out.String(), "leaf-01") || !strings.Contains(out.String(), "Active") {
@@ -166,6 +166,19 @@ func TestGetResourceRejectsInvalidInputsAndMissingToken(t *testing.T) {
 		if err == nil {
 			t.Fatalf("getResource(%#v) succeeded", args)
 		}
+	}
+}
+
+func TestResourceConnectionRejectsLegacyInsecureProfile(t *testing.T) {
+	deps := dependencies{
+		configs: &memoryConfigStore{cfg: config.Config{CurrentProfile: "lab", Profiles: map[string]config.Profile{
+			"lab": {BaseURL: "https://netbox.example", InsecureTLS: true},
+		}}},
+		tokens: &memoryTokenStore{values: map[string]string{"lab": "secret"}},
+	}
+	_, _, err := resourceConnection(deps, "")
+	if err == nil || !strings.Contains(err.Error(), "authenticate again") {
+		t.Fatalf("resourceConnection() error = %v", err)
 	}
 }
 
